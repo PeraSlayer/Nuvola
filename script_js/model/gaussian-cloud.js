@@ -14,6 +14,13 @@ export class GaussianCloud {
     });
   }
 
+  dispose() {
+    this.positions = null;
+    this.colors = null;
+    this.count = 0;
+    this._gpuBytes = 0;
+  }
+
   getGPUByteSize() {
     return this._gpuBytes;
   }

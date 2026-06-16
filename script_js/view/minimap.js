@@ -74,6 +74,12 @@ export class MiniMap {
     ctx.stroke();
   }
 
+  clearCache() {
+    this.isCached = false;
+    this.bgCanvas.width = 0;
+    this.bgCanvas.height = 0;
+  }
+
   // NUOVO: Metodo isolato per disegnare i punti una volta sola
   _cachePointCloud(cloud, w, h) {
     const ctx = this.bgCtx;

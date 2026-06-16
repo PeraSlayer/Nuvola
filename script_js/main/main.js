@@ -571,8 +571,13 @@ class App {
       this.renderer.dispose();
       this.cloud.dispose();
       this.cloud = null;
-      this.gaussianCloud = null;
+      if (this.gaussianCloud) {
+        this.gaussianCloud.dispose();
+        this.gaussianCloud = null;
+      }
+      this.minimap.clearCache();
       this.clearMeasurement();
+      this.renderer.init();
     }
     this.cloudTransform.reset();
     this.gizmo.setMode('none');
@@ -786,9 +791,11 @@ class App {
       this.renderer.dispose();
       this.cloud.dispose();
       this.cloud = null;
-      this.gaussianCloud = null;
+      if (this.gaussianCloud) {
+        this.gaussianCloud.dispose();
+        this.gaussianCloud = null;
+      }
     }
-    this.renderer.dispose();
     this.plyLoader.dispose();
     this.lasLoader.dispose();
     this.xyzLoader.dispose();

@@ -122,6 +122,16 @@ export class Renderer {
     return prog;
   }
 
+  init() {
+    this._initShaders();
+    this._initBuffers();
+    this._initFBO();
+    this._fboValid = false;
+    this.resize(this.width || this.canvas.width, this.height || this.canvas.height);
+    this._uniformState = {};
+    this._lightState = {};
+  }
+
   _initShaders() {
     const gl = this.gl;
 
@@ -257,13 +267,17 @@ export class Renderer {
     this._gpuBytes = cloud.getGPUByteSize();
     this._cloudVao = this._createCloudVAO(cloud);
 
+    this._lodGpuResources = [];
     for (const lod of cloud.lodLevels) {
       if (!lod.indices) continue;
       if (lod.indices.length > 5_000_000) continue;
-      lod._gpuBuf = this._requireResource(gl.createBuffer(), 'LOD index buffer');
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lod._gpuBuf);
+      const buf = this._requireResource(gl.createBuffer(), 'LOD index buffer');
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lod.indices, gl.STATIC_DRAW);
-      lod._gpuVao = this._createCloudVAO(cloud, lod._gpuBuf);
+      const vao = this._createCloudVAO(cloud, buf);
+      this._lodGpuResources.push({ vao, buf });
+      lod._gpuBuf = buf;
+      lod._gpuVao = vao;
     }
 
     if (this._dynamicIndexVao) gl.deleteVertexArray(this._dynamicIndexVao);
@@ -307,27 +321,41 @@ export class Renderer {
     this._dynamicIndexBufSize = 0;
     this._cullIndices = null;
 
-    if (!this._cloud) return;
-    for (const lod of this._cloud.lodLevels) {
-      if (lod._gpuVao) { gl.deleteVertexArray(lod._gpuVao); lod._gpuVao = null; }
-      if (lod._gpuBuf) { gl.deleteBuffer(lod._gpuBuf); lod._gpuBuf = null; }
+    if (this._lodGpuResources) {
+      for (const res of this._lodGpuResources) {
+        if (res.vao) gl.deleteVertexArray(res.vao);
+        if (res.buf) gl.deleteBuffer(res.buf);
+      }
+      this._lodGpuResources = null;
     }
+    this._lastLOD = null;
   }
 
   dispose() {
     const gl = this.gl;
     this._disposeCloudVAOs();
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboPos);
-    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboCol);
-    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboInt);
-    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    if (this.vboPos) { gl.deleteBuffer(this.vboPos); this.vboPos = null; }
+    if (this.vboCol) { gl.deleteBuffer(this.vboCol); this.vboCol = null; }
+    if (this.vboInt) { gl.deleteBuffer(this.vboInt); this.vboInt = null; }
+
+    if (this.progPoint) { gl.deleteProgram(this.progPoint); this.progPoint = null; }
+    if (this.progLight) { gl.deleteProgram(this.progLight); this.progLight = null; }
+
+    if (this.fbo) { gl.deleteFramebuffer(this.fbo); this.fbo = null; }
+    if (this.colorTex) { gl.deleteTexture(this.colorTex); this.colorTex = null; }
+    if (this.depthTex) { gl.deleteTexture(this.depthTex); this.depthTex = null; }
+    if (this._depthRB) { gl.deleteRenderbuffer(this._depthRB); this._depthRB = null; }
+
+    if (this._quadVao) { gl.deleteVertexArray(this._quadVao); this._quadVao = null; }
 
     this._cloud = null;
+    this._lastLOD = null;
     this._gpuBytes = 0;
+    this._fboValid = false;
+    this.depthAtlas = null;
+    this._uniformState = {};
+    this._lightState = {};
   }
 
   getMemoryMB() {
