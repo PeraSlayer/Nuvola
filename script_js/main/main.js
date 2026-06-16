@@ -14,10 +14,10 @@ import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
 import { UIController }    from '../view/ui-controller.js';
 import { TileManager }     from '../model/TileManager.js';
-import { OPFSManager }     from '../model/opfs-manager.js';
 import { TileCache }       from '../rendering-app/tile-cache.js';
+import { write, file, dir } from 'opfs-tools';
 
-async function writeTilesToOPFS(opfs, cloud, tiles, gridSize) {
+async function writeTilesToOPFS(fileKey, cloud, tiles, gridSize) {
   if (!tiles || tiles.length === 0) return;
   const positions = cloud.positions;
   const colors = cloud.colors;
@@ -54,6 +54,7 @@ async function writeTilesToOPFS(opfs, cloud, tiles, gridSize) {
     if (hasInt) arr.int[di] = intensity[i];
   }
 
+  const root = '/' + fileKey;
   for (const tile of tiles) {
     const arr = tileArrays[tile.ty * gs + tile.tx];
     if (!arr) continue;
@@ -69,7 +70,7 @@ async function writeTilesToOPFS(opfs, cloud, tiles, gridSize) {
     new Float32Array(buf, headerBytes, C * 3).set(arr.pos);
     new Uint8Array(buf, headerBytes + posBytes, C * 3).set(arr.col);
     if (hasInt) new Float32Array(buf, headerBytes + posBytes + colBytes, C).set(arr.int);
-    await opfs.writeTile(tile.tx + '_' + tile.ty, buf);
+    await write(root + '/' + tile.tx + '_' + tile.ty + '.bin', buf);
   }
 }
 
@@ -99,7 +100,7 @@ class App {
 
     this.cloud        = null;
     this.gaussianCloud = null;
-    this._opfs = null;
+    this._opfsFileKey = null;
     this._tileCache = null;
     this.gaussianMode  = false;
     this.colorMode    = 'rgb';
@@ -640,9 +641,9 @@ class App {
         this._tileCache.dispose();
         this._tileCache = null;
       }
-      if (this._opfs) {
-        this._opfs.deleteAll();
-        this._opfs = null;
+      if (this._opfsFileKey) {
+        await dir('/' + this._opfsFileKey).remove().catch(() => {});
+        this._opfsFileKey = null;
       }
       this.minimap.clearCache();
       this.clearMeasurement();
@@ -664,7 +665,7 @@ class App {
       }
 
       const TILE_THRESHOLD = 10_000_000;
-      const useTileMode = result.count > TILE_THRESHOLD && OPFSManager.isSupported();
+      const useTileMode = result.count > TILE_THRESHOLD && typeof navigator.storage?.getDirectory === 'function';
 
       if (useTileMode) {
         document.getElementById('loading-text').textContent = `Writing tiles to OPFS…`;
@@ -686,8 +687,8 @@ class App {
           tileMode: true,
         });
 
-        this._opfs = new OPFSManager('file_' + Date.now());
-        await writeTilesToOPFS(this._opfs, this.cloud, result.tiles, result.gridSize || 10);
+        this._opfsFileKey = 'nuvola_' + Date.now();
+        await writeTilesToOPFS(this._opfsFileKey, this.cloud, result.tiles, result.gridSize || 10);
 
         this.cloud.positions = null;
         this.cloud.colors = null;
@@ -698,8 +699,8 @@ class App {
           attrPos: this.renderer.attrPos,
           attrCol: this.renderer.attrCol,
           attrInt: this.renderer.attrInt,
+          fileKey: this._opfsFileKey,
         });
-        this._tileCache.setOPFSManager(this._opfs);
         this._tileCache.setHasIntensity(result.hasIntensity);
         this._tileCache.setOnTileLoaded(() => this.camera.markDirty());
 
@@ -923,9 +924,9 @@ class App {
       this._tileCache.dispose();
       this._tileCache = null;
     }
-    if (this._opfs) {
-      this._opfs.deleteAll();
-      this._opfs = null;
+    if (this._opfsFileKey) {
+      dir('/' + this._opfsFileKey).remove().catch(() => {});
+      this._opfsFileKey = null;
     }
     this.plyLoader.dispose();
     this.lasLoader.dispose();

@@ -1,10 +1,11 @@
+import { file } from 'opfs-tools';
+
 export class TileCache {
   constructor(gl, options = {}) {
     this.gl = gl;
     this.maxPoints = options.maxPoints || 50_000_000;
     this._cache = new Map();
     this._loadingTiles = new Set();
-    this._opfs = null;
     this._totalPoints = 0;
     this._attrPos = options.attrPos != null ? options.attrPos : 0;
     this._attrCol = options.attrCol != null ? options.attrCol : 1;
@@ -12,10 +13,7 @@ export class TileCache {
     this._hasIntensity = true;
     this._onTileLoaded = null;
     this._loadDebounceTimer = null;
-  }
-
-  setOPFSManager(opfs) {
-    this._opfs = opfs;
+    this._fileKey = options.fileKey || null;
   }
 
   setHasIntensity(v) {
@@ -24,6 +22,10 @@ export class TileCache {
 
   setOnTileLoaded(fn) {
     this._onTileLoaded = fn;
+  }
+
+  setFileKey(key) {
+    this._fileKey = key;
   }
 
   has(key) {
@@ -39,11 +41,12 @@ export class TileCache {
   }
 
   async loadTileAsync(key, tile) {
-    if (this._cache.has(key) || this._loadingTiles.has(key) || !this._opfs) return;
+    if (this._cache.has(key) || this._loadingTiles.has(key) || !this._fileKey) return;
     this._loadingTiles.add(key);
 
     try {
-      const data = await this._opfs.readTile(key);
+      const path = '/' + this._fileKey + '/' + key + '.bin';
+      const data = await file(path).arrayBuffer();
       const dv = new DataView(data);
       const count = dv.getUint32(0, true);
       if (!count) return;
