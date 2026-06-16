@@ -682,6 +682,111 @@ export class Renderer {
     return drawCount;
   }
 
+  _tileScreenVisible(tile, camera, w, h, center) {
+    const b = tile.bounds;
+    const cx = center[0], cy = center[1];
+    const corners = [
+      [b.min[0], b.min[1]], [b.max[0], b.min[1]],
+      [b.min[0], b.max[1]], [b.max[0], b.max[1]],
+    ];
+    const angle = camera._rotAngle;
+    const cosA = Math.cos(angle), sinA = Math.sin(angle);
+    const panX = camera.panX, panY = camera.panY;
+    const zoomVal = camera.zoom;
+    const margin = 60;
+    for (const [x, y] of corners) {
+      const lx = x - cx, ly = y - cy;
+      const rx = lx * cosA - ly * sinA;
+      const ry = lx * sinA + ly * cosA;
+      const sx = (rx - ry) * zoomVal + panX;
+      const sy = ((rx + ry) * 0.5) * zoomVal + panY;
+      if (sx >= -margin && sx <= w + margin && sy >= -margin && sy <= h + margin) return true;
+    }
+    return false;
+  }
+
+  renderTiles(camera, tileManager, tileCache, opts = {}) {
+    if (!this._fboValid) return 0;
+    const t0 = performance.now();
+    const gl = this.gl;
+    const w = this.width, h = this.height;
+    const colorMode = opts.colorMode || 'rgb';
+    const lightDir = opts.lightDir || DEFAULT_LIGHT_DIR;
+    const ambient = opts.ambient != null ? opts.ambient : 0.25;
+    const shading = opts.shading !== false;
+    const cloud = opts.cloud;
+
+    const visible = [];
+    for (const tile of tileManager.tiles) {
+      if (this._tileScreenVisible(tile, camera, w, h, cloud.center)) visible.push(tile);
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(this.progPoint);
+
+    this._applyCameraUniforms(camera, cloud);
+    this._pointUniforms.uniform1i(this.uPoint.fpsMode, 'point.fpsMode', 0);
+    this._pointUniforms.uniform1i(this.uPoint.colorMode, 'point.colorMode', COLOR_MODE_VALUE[colorMode] != null ? COLOR_MODE_VALUE[colorMode] : 0);
+    gl.uniform1i(this.uPoint.useCloudTransform, 0);
+
+    let totalCount = 0;
+    for (const tile of visible) {
+      const entry = tileCache.get(tile.id);
+      if (!entry) {
+        tileCache.loadTileAsync(tile.id, tile).then(() => camera.markDirty());
+        continue;
+      }
+      tileCache.touch(tile.id);
+      gl.bindVertexArray(entry.vao);
+
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.colorMask(false, false, false, false);
+      gl.drawArrays(gl.POINTS, 0, entry.count);
+
+      gl.colorMask(true, true, true, true);
+      gl.depthMask(false);
+      gl.depthFunc(gl.EQUAL);
+      gl.disable(gl.BLEND);
+      gl.drawArrays(gl.POINTS, 0, entry.count);
+
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.enable(gl.BLEND);
+
+      totalCount += entry.count;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(this.progLight);
+    gl.bindVertexArray(this._quadVao);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.colorTex);
+    this._lightUniforms.uniform1i(this.uLight.colorTex, 'light.colorTex', 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
+    this._lightUniforms.uniform1i(this.uLight.depthTex, 'light.depthTex', 1);
+
+    this._lightUniforms.uniform2fv(this.uLight.texel, 'light.texel', this._lightTexel);
+    this._lightUniforms.uniform3fv(this.uLight.lightDir, 'light.lightDir', lightDir);
+    this._lightUniforms.uniform1f(this.uLight.ambient, 'light.ambient', ambient);
+    this._lightUniforms.uniform1i(this.uLight.shading, 'light.shading', shading ? 1 : 0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    this._lastDrawCount = totalCount;
+    this._benchPointMs = performance.now() - t0;
+    return totalCount;
+  }
+
   generateDepthAtlas(cloud, numViews = 4) {
     if (!this._fboValid || !this._cloudVao) return;
 

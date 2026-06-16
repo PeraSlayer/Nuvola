@@ -14,6 +14,64 @@ import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
 import { UIController }    from '../view/ui-controller.js';
 import { TileManager }     from '../model/TileManager.js';
+import { OPFSManager }     from '../model/opfs-manager.js';
+import { TileCache }       from '../rendering-app/tile-cache.js';
+
+async function writeTilesToOPFS(opfs, cloud, tiles, gridSize) {
+  if (!tiles || tiles.length === 0) return;
+  const positions = cloud.positions;
+  const colors = cloud.colors;
+  const intensity = cloud.intensity;
+  const bounds = cloud.bounds;
+  const spanX = bounds.max[0] - bounds.min[0] || 1;
+  const spanY = bounds.max[1] - bounds.min[1] || 1;
+  const hasInt = intensity !== null;
+  const gs = gridSize || 10;
+
+  const tileArrays = [];
+  for (let i = 0; i < gs * gs; i++) tileArrays[i] = null;
+
+  for (const tile of tiles) {
+    const c = tile.count;
+    const arr = {
+      pos: new Float32Array(c * 3),
+      col: new Uint8Array(c * 3),
+      int: hasInt ? new Float32Array(c) : null,
+      idx: 0,
+    };
+    tileArrays[tile.ty * gs + tile.tx] = arr;
+  }
+
+  for (let i = 0; i < cloud.count; i++) {
+    const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+    const tx = Math.min(Math.floor((x - bounds.min[0]) / spanX * gs), gs - 1);
+    const ty = Math.min(Math.floor((y - bounds.min[1]) / spanY * gs), gs - 1);
+    const arr = tileArrays[ty * gs + tx];
+    if (!arr) continue;
+    const di = arr.idx++;
+    arr.pos[di * 3] = x; arr.pos[di * 3 + 1] = y; arr.pos[di * 3 + 2] = z;
+    arr.col[di * 3] = colors[i * 3]; arr.col[di * 3 + 1] = colors[i * 3 + 1]; arr.col[di * 3 + 2] = colors[i * 3 + 2];
+    if (hasInt) arr.int[di] = intensity[i];
+  }
+
+  for (const tile of tiles) {
+    const arr = tileArrays[tile.ty * gs + tile.tx];
+    if (!arr) continue;
+    const C = tile.count;
+    const headerBytes = 4;
+    const posBytes = C * 12;
+    const colBytes = C * 3;
+    const intBytes = hasInt ? C * 4 : 0;
+    const totalBytes = headerBytes + posBytes + colBytes + intBytes;
+    const buf = new ArrayBuffer(totalBytes);
+    const view = new DataView(buf);
+    view.setUint32(0, C, true);
+    new Float32Array(buf, headerBytes, C * 3).set(arr.pos);
+    new Uint8Array(buf, headerBytes + posBytes, C * 3).set(arr.col);
+    if (hasInt) new Float32Array(buf, headerBytes + posBytes + colBytes, C).set(arr.int);
+    await opfs.writeTile(tile.tx + '_' + tile.ty, buf);
+  }
+}
 
 class App {
   constructor() {
@@ -41,6 +99,8 @@ class App {
 
     this.cloud        = null;
     this.gaussianCloud = null;
+    this._opfs = null;
+    this._tileCache = null;
     this.gaussianMode  = false;
     this.colorMode    = 'rgb';
     this.lightAz      = 315;
@@ -575,6 +635,14 @@ class App {
         this.gaussianCloud.dispose();
         this.gaussianCloud = null;
       }
+      if (this._tileCache) {
+        this._tileCache.dispose();
+        this._tileCache = null;
+      }
+      if (this._opfs) {
+        this._opfs.deleteAll();
+        this._opfs = null;
+      }
       this.minimap.clearCache();
       this.clearMeasurement();
       this.renderer.init();
@@ -594,37 +662,82 @@ class App {
         throw new Error(result && result.error || 'Loader returned no data');
       }
 
-      this.cloud = new PointCloud({
-        count: result.count,
-        hasColor: result.hasColor,
-        hasIntensity: result.hasIntensity,
-        bounds: result.bounds,
-        center: result.center,
-        zMin: result.zMin,
-        zMax: result.zMax,
-        intensityMin: result.intensityMin,
-        intensityMax: result.intensityMax,
-        positions: result.positions,
-        colors: result.colors,
-        intensity: result.intensity || null,
-        tileManager: this.tileManager,
-      });
+      const TILE_THRESHOLD = 10_000_000;
+      const useTileMode = result.count > TILE_THRESHOLD && OPFSManager.isSupported();
 
-      this.renderer.uploadPointCloud(this.cloud);
-      this.tileManager && this.tileManager.dispose && this.tileManager.dispose();
-      if (result.tiles) {
-        this.tileManager.registerTileMetadata(result.tiles);
-      }
+      if (useTileMode) {
+        document.getElementById('loading-text').textContent = `Writing tiles to OPFS…`;
 
-      this.camera.setRefCenter(this.cloud.center);
-      this._fitView();
-
-      if (this.gaussianMode) {
-        this.renderer.renderSplats(this.camera, this.gaussianCloud, {
-          viewDir: this._getViewDir(),
-          ambient: this.lightAmb,
+        this.cloud = new PointCloud({
+          count: result.count,
+          hasColor: result.hasColor,
+          hasIntensity: result.hasIntensity,
+          bounds: result.bounds,
+          center: result.center,
+          zMin: result.zMin,
+          zMax: result.zMax,
+          intensityMin: result.intensityMin,
+          intensityMax: result.intensityMax,
+          positions: result.positions,
+          colors: result.colors,
+          intensity: result.intensity || null,
+          tileManager: this.tileManager,
+          tileMode: true,
         });
+
+        this._opfs = new OPFSManager('file_' + Date.now());
+        await writeTilesToOPFS(this._opfs, this.cloud, result.tiles, result.gridSize || 10);
+
+        this.cloud.positions = null;
+        this.cloud.colors = null;
+        this.cloud.intensity = null;
+
+        this._tileCache = new TileCache(this.renderer.gl, {
+          maxPoints: 50_000_000,
+          attrPos: this.renderer.attrPos,
+          attrCol: this.renderer.attrCol,
+          attrInt: this.renderer.attrInt,
+        });
+        this._tileCache.setOPFSManager(this._opfs);
+        this._tileCache.setHasIntensity(result.hasIntensity);
+
+        this.tileManager && this.tileManager.dispose && this.tileManager.dispose();
+        if (result.tiles) {
+          this.tileManager.registerTileMetadata(result.tiles);
+        }
+
+        this.camera.setRefCenter(this.cloud.center);
+        this._fitView();
       } else {
+        if (result.count > TILE_THRESHOLD) {
+          alert('OPFS not supported. Loading in legacy mode (RAM).');
+        }
+
+        this.cloud = new PointCloud({
+          count: result.count,
+          hasColor: result.hasColor,
+          hasIntensity: result.hasIntensity,
+          bounds: result.bounds,
+          center: result.center,
+          zMin: result.zMin,
+          zMax: result.zMax,
+          intensityMin: result.intensityMin,
+          intensityMax: result.intensityMax,
+          positions: result.positions,
+          colors: result.colors,
+          intensity: result.intensity || null,
+          tileManager: this.tileManager,
+        });
+
+        this.renderer.uploadPointCloud(this.cloud);
+        this.tileManager && this.tileManager.dispose && this.tileManager.dispose();
+        if (result.tiles) {
+          this.tileManager.registerTileMetadata(result.tiles);
+        }
+
+        this.camera.setRefCenter(this.cloud.center);
+        this._fitView();
+
         this.renderer.render(this.camera, this.cloud, {
           colorMode: this.colorMode,
           lightDir:  this.getLightDir(),
@@ -633,6 +746,10 @@ class App {
           decimationOptions: this.getDecimationOptions(),
           cloudTransform: this.cloudTransform,
         });
+
+        setTimeout(() => this.renderer.generateDepthAtlas(
+          this.cloud, this.camera.eightDir ? 8 : 4
+        ), 100);
       }
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
@@ -643,10 +760,6 @@ class App {
         `${file.name}<br/>${this.cloud.count.toLocaleString()} points<br/>${format}<br/>` +
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
         (this.cloud.hasIntensity ? 'Intensity ✓' : '');
-
-      setTimeout(() => this.renderer.generateDepthAtlas(
-        this.cloud, this.camera.eightDir ? 8 : 4
-      ), 100);
     } catch (err) {
       console.error(err);
       alert(`Failed to load ${format} file: ${err.message}`);
@@ -701,7 +814,15 @@ class App {
     let lodCount = this.renderer._lastDrawCount;
 
     if (needsRender) {
-      if (this.gaussianMode && this.gaussianCloud) {
+      if (this.cloud && this.cloud.tileMode && this._tileCache) {
+        lodCount = this.renderer.renderTiles(this.camera, this.tileManager, this._tileCache, {
+          colorMode: this.colorMode,
+          lightDir:  this.getLightDir(),
+          ambient:   this.lightAmb,
+          shading:   this.shading,
+          cloud:     this.cloud,
+        });
+      } else if (this.gaussianMode && this.gaussianCloud) {
         const zoomDensity = Math.min(1.0, Math.max(0.3, this.camera.zoom * 0.1));
         const densityFactor = zoomDensity * this.gaussianDensity;
         lodCount = this.renderer.renderSplats(this.camera, this.gaussianCloud, {
@@ -795,6 +916,14 @@ class App {
         this.gaussianCloud.dispose();
         this.gaussianCloud = null;
       }
+    }
+    if (this._tileCache) {
+      this._tileCache.dispose();
+      this._tileCache = null;
+    }
+    if (this._opfs) {
+      this._opfs.deleteAll();
+      this._opfs = null;
     }
     this.plyLoader.dispose();
     this.lasLoader.dispose();

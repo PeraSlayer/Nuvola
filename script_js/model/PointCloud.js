@@ -65,22 +65,26 @@ export class PointCloud {
     }
 
     this.tileManager = data.tileManager || null;
+    this.tileMode = !!data.tileMode;
 
     this.positions   = data.positions || null;
     this.colors      = data.colors || null;
     this.intensity   = data.intensity || null;
     this.lodLevels = [];
-    const TOTAL = this.count;
-    const MAX_CANDIDATES = 10000000;
-    for (let level = 0; level < 8; level++) {
-      const stride = Math.pow(2, level + 1);
-      const spacing = Math.max(stride, Math.ceil(TOTAL / MAX_CANDIDATES));
-      const lodCount = Math.ceil(TOTAL / spacing);
-      const indices = new Uint32Array(lodCount);
-      for (let i = 0; i < lodCount; i++) {
-        indices[i] = Math.min(i * spacing, TOTAL - 1);
+
+    if (!this.tileMode) {
+      const TOTAL = this.count;
+      const MAX_CANDIDATES = 10000000;
+      for (let level = 0; level < 8; level++) {
+        const stride = Math.pow(2, level + 1);
+        const spacing = Math.max(stride, Math.ceil(TOTAL / MAX_CANDIDATES));
+        const lodCount = Math.ceil(TOTAL / spacing);
+        const indices = new Uint32Array(lodCount);
+        for (let i = 0; i < lodCount; i++) {
+          indices[i] = Math.min(i * spacing, TOTAL - 1);
+        }
+        this.lodLevels.push({ level, count: lodCount, indices, minCount: lodCount });
       }
-      this.lodLevels.push({ level, count: lodCount, indices, minCount: lodCount });
     }
 
     this._buildToken = 0;
