@@ -1,0 +1,184 @@
+/* =============================================================================
+   Nuvola — 2.5D PLY Point Cloud Viewer
+   Stylesheet
+   ========================================================================== */
+
+/* --- Design tokens -------------------------------------------------------- */
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --accent2: #3fb950;
+  --danger: #f85149;
+  --radius: 8px;
+  --sidebar-w: 300px;
+}
+
+/* --- Reset ---------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%; overflow: hidden;
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+}
+
+/* --- App layout ----------------------------------------------------------- */
+#app { display: flex; height: 100%; width: 100%; }
+
+#sidebar {
+  width: var(--sidebar-w); min-width: var(--sidebar-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow-y: auto; z-index: 10;
+  transition: transform 0.25s ease;
+}
+
+#sidebar h1 {
+  font-size: 1.1rem; padding: 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--accent); letter-spacing: 0.02em;
+}
+#sidebar h1 span {
+  display: block; font-size: 0.7rem; color: var(--muted);
+  font-weight: 400; margin-top: 4px;
+}
+
+#main { flex: 1; position: relative; overflow: hidden; }
+#glcanvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+/* --- Panels --------------------------------------------------------------- */
+.panel { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.panel h2 {
+  font-size: 0.75rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--muted);
+  margin-bottom: 10px;
+}
+
+/* --- Form controls -------------------------------------------------------- */
+label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.row label { margin: 0; flex: 1; }
+.row span.val {
+  min-width: 42px; text-align: right;
+  font-size: 0.75rem; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+button, .btn {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  padding: 7px 12px; border-radius: var(--radius);
+  cursor: pointer; font-size: 0.8rem;
+  transition: background 0.15s, border-color 0.15s;
+}
+button:hover, .btn:hover { background: #2d333b; border-color: var(--accent); }
+button.active { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+
+.btn-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.btn-grid.eight { grid-template-columns: repeat(4, 1fr); }
+
+.view-snap { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.view-snap .snap-btn { font-size: 0.72rem; padding: 5px 8px; text-align: center; }
+
+.stat {
+  font-size: 0.78rem; color: var(--muted);
+  line-height: 1.6; font-variant-numeric: tabular-nums;
+}
+.stat b { color: var(--text); }
+
+input[type="file"] { display: none; }
+.mode-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.mode-btns button { flex: 1 1 45%; }
+
+select {
+  width: 100%; background: var(--surface2);
+  border: 1px solid var(--border); color: var(--text);
+  padding: 7px; border-radius: var(--radius); font-size: 0.8rem;
+}
+
+/* --- Overlays & HUD ------------------------------------------------------- */
+#drop-overlay {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(13,17,23,0.85);
+  border: 2px dashed var(--border); margin: 16px;
+  border-radius: 12px;
+  pointer-events: none; opacity: 0;
+  transition: opacity 0.2s; z-index: 5;
+}
+#drop-overlay.visible { opacity: 1; pointer-events: all; }
+#drop-overlay p { color: var(--muted); font-size: 1.1rem; text-align: center; }
+#drop-overlay p strong { color: var(--accent); display: block; font-size: 1.4rem; margin-bottom: 8px; }
+
+#hud {
+  position: absolute; top: 12px; left: 12px;
+  background: rgba(22,27,34,0.88);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 0.72rem; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none; line-height: 1.7;
+}
+#hud b { color: var(--text); }
+
+#minimap {
+  position: absolute; bottom: 12px; right: 12px;
+  width: 140px; height: 140px;
+  background: rgba(22,27,34,0.92);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; pointer-events: none;
+}
+#minimap canvas { width: 100%; height: 100%; display: block; }
+
+#measure-info {
+  position: absolute; bottom: 12px; left: 12px;
+  background: rgba(22,27,34,0.92);
+  border: 1px solid var(--accent); border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 0.78rem; display: none; line-height: 1.7;
+}
+#measure-info.visible { display: block; }
+#measure-info .title { color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+
+#loading {
+  position: absolute; inset: 0;
+  background: rgba(13,17,23,0.75); display: none;
+  align-items: center; justify-content: center;
+  flex-direction: column; gap: 12px; z-index: 20;
+}
+#loading.visible { display: flex; }
+.spinner {
+  width: 40px; height: 40px;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#toggle-sidebar {
+  display: none; position: absolute; top: 12px; right: 12px;
+  z-index: 15;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px; font-size: 1rem;
+}
+
+/* --- Responsive ----------------------------------------------------------- */
+@media (max-width: 768px) {
+  :root { --sidebar-w: 260px; }
+  #sidebar {
+    position: absolute; height: 100%;
+    transform: translateX(-100%);
+    box-shadow: 4px 0 24px rgba(0,0,0,0.4);
+  }
+  #sidebar.open { transform: translateX(0); }
+  #toggle-sidebar { display: block; }
+  #minimap { width: 100px; height: 100px; }
+}
