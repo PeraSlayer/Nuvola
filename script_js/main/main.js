@@ -310,6 +310,7 @@ class App {
   }
 
   toggleGaussianMode() {
+    if (this.cloud && this.cloud.tileMode) return;
     this.gaussianMode = !this.gaussianMode;
     const cb = document.getElementById('chk-gaussian');
     if (cb) cb.checked = this.gaussianMode;
@@ -700,6 +701,7 @@ class App {
         });
         this._tileCache.setOPFSManager(this._opfs);
         this._tileCache.setHasIntensity(result.hasIntensity);
+        this._tileCache.setOnTileLoaded(() => this.camera.markDirty());
 
         this.tileManager && this.tileManager.dispose && this.tileManager.dispose();
         if (result.tiles) {

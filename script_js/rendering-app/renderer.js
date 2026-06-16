@@ -736,7 +736,9 @@ export class Renderer {
     for (const tile of visible) {
       const entry = tileCache.get(tile.id);
       if (!entry) {
-        tileCache.loadTileAsync(tile.id, tile).then(() => camera.markDirty());
+        if (!tileCache.isLoading(tile.id)) {
+          tileCache.loadTileAsync(tile.id, tile);
+        }
         continue;
       }
       tileCache.touch(tile.id);
