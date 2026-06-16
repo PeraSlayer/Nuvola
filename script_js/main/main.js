@@ -18,7 +18,8 @@ import { TileCache }       from '../rendering-app/tile-cache.js';
 import { write, file, dir } from 'opfs-tools';
 
 async function writeTilesToOPFS(fileKey, cloud, tiles, gridSize) {
-  if (!tiles || tiles.length === 0) return;
+  if (!tiles || tiles.length === 0) { console.warn('[OPFS] no tiles to write'); return; }
+  const t0 = performance.now();
   const positions = cloud.positions;
   const colors = cloud.colors;
   const intensity = cloud.intensity;
@@ -72,6 +73,7 @@ async function writeTilesToOPFS(fileKey, cloud, tiles, gridSize) {
     if (hasInt) new Float32Array(buf, headerBytes + posBytes + colBytes, C).set(arr.int);
     await write(root + '/' + tile.tx + '_' + tile.ty + '.bin', buf);
   }
+  console.log(`[OPFS] wrote ${tiles.length} tiles (${cloud.count} pts total) in ${(performance.now() - t0).toFixed(0)}ms`);
 }
 
 class App {
