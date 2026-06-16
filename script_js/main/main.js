@@ -607,6 +607,9 @@ class App {
 
       this.renderer.uploadPointCloud(this.cloud);
       this.tileManager && this.tileManager.dispose && this.tileManager.dispose();
+      if (result.tiles) {
+        this.tileManager.registerTileMetadata(result.tiles);
+      }
 
       this.camera.setRefCenter(this.cloud.center);
       this._fitView();

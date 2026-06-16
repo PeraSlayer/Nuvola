@@ -21,11 +21,16 @@ self.onmessage = function(e) {
     const dv = new DataView(d.data);
     const off = d.offsets, typ = d.types;
     const hasColor = d.hasColor, hasInt = d.hasIntensity;
+    const gridSize = d.gridSize || 10;
     const positions = new Float32Array(count * 3);
     const colors = new Uint8Array(count * 3);
     const intensity = hasInt ? new Float32Array(count) : null;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
     let minI = Infinity, maxI = -Infinity;
+    const grid = new Array(gridSize * gridSize);
+    for (let g = 0; g < grid.length; g++) {
+      grid[g] = { count: 0, minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity, minI: Infinity, maxI: -Infinity };
+    }
     for (let i = 0; i < count; i++) {
       const bo = i * stride;
       const x = rv(dv, bo + off.x, typ.x, le);
@@ -64,9 +69,42 @@ self.onmessage = function(e) {
         if (iv > maxI) maxI = iv;
       }
     }
+    const spanX = maxX - minX || 1;
+    const spanY = maxY - minY || 1;
+    for (let i = 0; i < count; i++) {
+      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+      const tx = Math.min(Math.floor((x - minX) / spanX * gridSize), gridSize - 1);
+      const ty = Math.min(Math.floor((y - minY) / spanY * gridSize), gridSize - 1);
+      const cell = grid[ty * gridSize + tx];
+      cell.count++;
+      if (x < cell.minX) cell.minX = x;
+      if (x > cell.maxX) cell.maxX = x;
+      if (y < cell.minY) cell.minY = y;
+      if (y > cell.maxY) cell.maxY = y;
+      if (z < cell.minZ) cell.minZ = z;
+      if (z > cell.maxZ) cell.maxZ = z;
+      if (hasInt) {
+        const iv = intensity[i];
+        if (iv < cell.minI) cell.minI = iv;
+        if (iv > cell.maxI) cell.maxI = iv;
+      }
+    }
     const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
     const iMin = hasInt ? minI : 0;
     const iMax = hasInt ? (maxI === minI ? maxI + 1 : maxI) : 1;
+    const tiles = [];
+    for (let idx = 0; idx < grid.length; idx++) {
+      const cell = grid[idx];
+      if (cell.count === 0) continue;
+      tiles.push({
+        tx: idx % gridSize,
+        ty: Math.floor(idx / gridSize),
+        count: cell.count,
+        bounds: { min: [cell.minX, cell.minY, cell.minZ], max: [cell.maxX, cell.maxY, cell.maxZ] },
+        intensityMin: hasInt ? cell.minI : 0,
+        intensityMax: hasInt ? (cell.maxI === cell.minI ? cell.maxI + 1 : cell.maxI) : 1,
+      });
+    }
     self.postMessage({
       ok: true,
       positions: positions.buffer,
@@ -79,6 +117,8 @@ self.onmessage = function(e) {
       center: [cx, cy, cz],
       zMin: minZ, zMax: maxZ,
       intensityMin: iMin, intensityMax: iMax,
+      gridSize,
+      tiles,
     }, (() => { const x = [positions.buffer, colors.buffer]; if (intensity) x.push(intensity.buffer); return x; })());
   } catch (err) {
     self.postMessage({ ok: false, error: err.message });
@@ -148,6 +188,7 @@ function parsePLYHeader(chunk) {
 export class PLYLoader {
   constructor(options = {}) {
     this.maxPoints = options.maxPoints || 50000000;
+    this.gridSize = options.gridSize || 10;
     this._workerUrl = null;
   }
 
@@ -225,6 +266,8 @@ export class PLYLoader {
           zMax: e.data.zMax,
           intensityMin: e.data.intensityMin,
           intensityMax: e.data.intensityMax,
+          gridSize: e.data.gridSize,
+          tiles: e.data.tiles,
         };
         resolve(result);
       } else {
@@ -237,6 +280,7 @@ export class PLYLoader {
       offsets: info.offsets, types: info.types,
       hasColor: info.hasColor, hasIntensity: info.hasIntensity,
       littleEndian: info.littleEndian,
+      gridSize: this.gridSize,
     }, [body]);
   }
 

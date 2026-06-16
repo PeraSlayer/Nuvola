@@ -18,6 +18,18 @@ export class TileManager {
     this.tileMap.set(tile.id, tile);
   }
 
+  registerTileMetadata(tiles) {
+    this.tiles = [];
+    this.tileMap.clear();
+    for (const t of tiles) {
+      t.id = t.tx + '_' + t.ty;
+      t.loaded = false;
+      t.gpuVao = null;
+      this.tiles.push(t);
+      this.tileMap.set(t.id, t);
+    }
+  }
+
   dispose() {
     this.tiles = [];
     this.tileMap.clear();

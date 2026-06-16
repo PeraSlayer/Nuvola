@@ -18,7 +18,9 @@ self.onmessage = function(e) {
       pos: new Float32Array(useRS ? mp * 3 : vc * 3),
       col: new Uint8Array(useRS ? mp * 3 : vc * 3),
       inten: new Float32Array(useRS ? mp : vc),
-      minI: Infinity, maxI: -Infinity,
+      minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity,
+      minZ: Infinity, maxZ: -Infinity, minI: Infinity, maxI: -Infinity,
+      gridSize: msg.gridSize || 10,
     };
   } else if (msg.type === 'chunk') {
     const s = state; if (!s) return;
@@ -32,6 +34,10 @@ self.onmessage = function(e) {
       const x = dv.getInt32(bo, true)     * s.scaleX + s.offsetX;
       const y = dv.getInt32(bo + 4, true)  * s.scaleY + s.offsetY;
       const z = dv.getInt32(bo + 8, true)  * s.scaleZ + s.offsetZ;
+
+      if (x < s.minX) s.minX = x; if (x > s.maxX) s.maxX = x;
+      if (y < s.minY) s.minY = y; if (y > s.maxY) s.maxY = y;
+      if (z < s.minZ) s.minZ = z; if (z > s.maxZ) s.maxZ = z;
 
       const iVal = dv.getUint16(bo, true);
 
@@ -130,9 +136,53 @@ self.onmessage = function(e) {
       }
     }
     const tr = [s.pos.buffer, s.col.buffer, s.inten.buffer];
+    const cx = (s.minX + s.maxX) * 0.5, cy = (s.minY + s.maxY) * 0.5, cz = (s.minZ + s.maxZ) * 0.5;
+    const iMin = s.minI, iMax = s.maxI === s.minI ? s.maxI + 1 : s.maxI;
+    const spanX = s.maxX - s.minX || 1;
+    const spanY = s.maxY - s.minY || 1;
+    const gs = s.gridSize;
+    const grid = new Array(gs * gs);
+    for (let g = 0; g < grid.length; g++) {
+      grid[g] = { count: 0, minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity, minI: Infinity, maxI: -Infinity };
+    }
+    for (let i = 0; i < actualCount; i++) {
+      const x = s.pos[i * 3], y = s.pos[i * 3 + 1], z = s.pos[i * 3 + 2];
+      const tx = Math.min(Math.floor((x - s.minX) / spanX * gs), gs - 1);
+      const ty = Math.min(Math.floor((y - s.minY) / spanY * gs), gs - 1);
+      const cell = grid[ty * gs + tx];
+      cell.count++;
+      if (x < cell.minX) cell.minX = x;
+      if (x > cell.maxX) cell.maxX = x;
+      if (y < cell.minY) cell.minY = y;
+      if (y > cell.maxY) cell.maxY = y;
+      if (z < cell.minZ) cell.minZ = z;
+      if (z > cell.maxZ) cell.maxZ = z;
+      const iv = s.inten[i];
+      if (iv < cell.minI) cell.minI = iv;
+      if (iv > cell.maxI) cell.maxI = iv;
+    }
+    const tiles = [];
+    for (let idx = 0; idx < grid.length; idx++) {
+      const cell = grid[idx];
+      if (cell.count === 0) continue;
+      tiles.push({
+        tx: idx % gs,
+        ty: Math.floor(idx / gs),
+        count: cell.count,
+        bounds: { min: [cell.minX, cell.minY, cell.minZ], max: [cell.maxX, cell.maxY, cell.maxZ] },
+        intensityMin: cell.minI,
+        intensityMax: cell.maxI === cell.minI ? cell.maxI + 1 : cell.maxI,
+      });
+    }
     self.postMessage({
       ok: true, positions: s.pos, colors: s.col, intensity: s.inten,
       count: actualCount, hasColor: s.hasCol, hasIntensity: true,
+      bounds: { min: [s.minX, s.minY, s.minZ], max: [s.maxX, s.maxY, s.maxZ] },
+      center: [cx, cy, cz],
+      zMin: s.minZ, zMax: s.maxZ,
+      intensityMin: 0, intensityMax: 1,
+      gridSize: gs,
+      tiles,
     }, tr);
     state = null;
   }
@@ -182,6 +232,7 @@ function parseLASHeader(chunk) {
 export class LASLoader {
   constructor(options = {}) {
     this.maxPoints = options.maxPoints || 50000000;
+    this.gridSize = options.gridSize || 10;
     const blob = new Blob([LAS_WORKER_SOURCE], { type: 'application/javascript' });
     this._workerUrl = URL.createObjectURL(blob);
   }
@@ -233,6 +284,7 @@ export class LASLoader {
       offsetX: info.offsetX, offsetY: info.offsetY, offsetZ: info.offsetZ,
       hasColor: info.hasColor,
       maxPoints: this.maxPoints,
+      gridSize: this.gridSize,
     });
   }
 

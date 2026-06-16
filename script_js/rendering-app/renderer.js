@@ -564,7 +564,9 @@ export class Renderer {
       drawIndices = null;
     }
 
+    const vao = (drawIndices && drawIndices.indices) ? this._dynamicIndexVao : this._cloudVao;
     if (drawIndices && drawIndices.indices) {
+      gl.bindVertexArray(vao);
       this._uploadDynamicIndices(drawIndices.indices, drawCount);
     }
 
@@ -595,8 +597,9 @@ export class Renderer {
       gl.uniform1i(this.uPoint.useCloudTransform, 0);
     }
 
-    const vao = (drawIndices && drawIndices.indices) ? this._dynamicIndexVao : this._cloudVao;
-    gl.bindVertexArray(vao);
+    if (!(drawIndices && drawIndices.indices)) {
+      gl.bindVertexArray(this._cloudVao);
+    }
 
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
