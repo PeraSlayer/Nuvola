@@ -1,3 +1,6 @@
 node_modules/
 .opencode/
 .DS_Store
+*.ply
+*.las
+*.laz
