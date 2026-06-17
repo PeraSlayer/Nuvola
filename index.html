@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Nuvola — 2.5D Point Cloud Viewer (PLY, LAS, LAZ, XYZ)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>Nuvola<span>Multi-Format Point Cloud Viewer</span></h1>
+
+    <div class="panel">
+      <h2>Load Data</h2>
+      <button class="primary full" id="btn-load">Open Point Cloud</button>
+      <input type="file" id="file-input" accept=".ply,.gz,.ply.gz,.las,.laz,.xyz,.txt,.pts,.rxp" />
+      <p class="stat mt-2" id="file-info">No file loaded<br/>Supported: PLY, LAS, LAZ, XYZ, TXT, PTS</p>
+    </div>
+    
+    <div class="panel">
+      <h2>View</h2>
+      <div class="row"><label>Zoom</label><input type="range" id="zoom-slider" min="0.01" max="1000" step="0.01" value="1" /><span class="val" id="zoom-val">1.0</span></div>
+      <div class="btn-grid" id="view-btns">
+        <button data-view="0" class="active" title="North">N</button>
+        <button data-view="1" title="East">E</button>
+        <button data-view="2" title="South">S</button>
+        <button data-view="3" title="West">W</button>
+      </div>
+      <div class="row-group">
+        <div class="row">
+          <button id="btn-rot-left" class="flex-1">↺ Left</button>
+          <button id="btn-rot-right" class="flex-1">↻ Right</button>
+        </div>
+        <div class="row"><label>Rotation Z</label><input type="range" id="rot-offset" min="0" max="360" step="1" value="90" /><span class="val" id="rot-offset-val">90°</span></div>
+        <div class="row"><label>Rotation X</label><input type="range" id="rot-x" min="-180" max="180" step="1" value="0" /><span class="val" id="rot-x-val">0°</span></div>
+        <div class="row"><label>Rotation Y</label><input type="range" id="rot-y" min="-180" max="180" step="1" value="0" /><span class="val" id="rot-y-val">0°</span></div>
+      </div>
+      <label class="mt-1"><input type="checkbox" id="chk-8dir" /> 8-direction mode</label>
+      <label><input type="checkbox" id="chk-smooth-rot" checked /> Smooth rotation</label>
+      <div class="view-snap">
+        <button class="snap-btn" data-view="top">⬇ Top</button>
+        <button class="snap-btn" data-view="front">➡ Front</button>
+        <button class="snap-btn" data-view="right">↘ Right</button>
+        <button class="snap-btn" data-view="back">⬆ Back</button>
+      </div>
+      <button id="btn-reset" class="full mt-1">Reset View</button>
+    </div>
+
+    <div class="panel">
+      <h2>Render Mode</h2>
+      <label><input type="checkbox" id="chk-gaussian" /> Gaussian Splatting</label>
+      <p class="stat hint">3D Gaussian Splatting (SH deg·1)</p>
+      <div class="row mt-1"><label>Density</label><input type="range" id="gaussian-density" min="0.1" max="1.0" step="0.05" value="1.0" /><span class="val" id="gaussian-density-val">1.0×</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Color Mode</h2>
+      <div class="mode-btns">
+        <button data-mode="rgb" class="active">RGB</button>
+        <button data-mode="height">Height</button>
+        <button data-mode="intensity">Intensity</button>
+        <button data-mode="depth">Depth</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Point Decimation</h2>
+      <label><input type="checkbox" id="chk-range-decimation" checked /> Enable range decimation</label>
+      <div class="row mt-1"><label>Min Detail Points</label><input type="range" id="min-detail-points" min="1000" max="500000" step="5000" value="50000" /><span class="val" id="min-detail-val">50k</span></div>
+      <div class="row"><label>Max Distance Ratio</label><input type="range" id="max-dist-ratio" min="0.1" max="1.0" step="0.05" value="1.0" /><span class="val" id="max-dist-ratio-val">1.0</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Lighting</h2>
+      <div class="row"><label>Light Azimuth</label><input type="range" id="light-az" min="0" max="360" step="1" value="315" /><span class="val" id="light-az-val">315°</span></div>
+      <div class="row"><label>Light Elevation</label><input type="range" id="light-el" min="5" max="85" step="1" value="45" /><span class="val" id="light-el-val">45°</span></div>
+      <div class="row"><label>Ambient</label><input type="range" id="light-amb" min="0" max="100" step="1" value="25" /><span class="val" id="light-amb-val">0.25</span></div>
+      <label><input type="checkbox" id="chk-shading" checked /> Depth-based shading</label>
+    </div>
+
+    <div class="panel">
+      <h2>Measure</h2>
+      <button id="btn-measure" class="full">Measure Distance</button>
+      <button id="btn-clear-measure" class="full mt-1">Clear Measurement</button>
+    </div>
+
+    <div class="panel">
+      <h2>Stats</h2>
+      <p class="stat" id="stats-info">Points: —<br/>LOD: —<br/>FPS: —<br/>GPU Mem: —</p>
+    </div>
+
+    <div class="panel">
+      <h2>Controls</h2>
+      <p class="stat small">
+        <b id="control-title-iso">Isometric Mode:</b><span id="control-iso">
+          <b>Left-drag:</b> Orbit / rotate<br/>
+          <b>Right-drag:</b> Pan<br/>
+          <b>Wheel:</b> Zoom<br/>
+          <b>Double-click:</b> Reset view<br/>
+        </span><span id="control-fps" style="display:none">
+          <b>Mouse:</b> Right-click + drag to look<br/>
+          Ctrl + Left-click + drag to look<br/>
+        </span>
+        <b>Keyboard:</b><br/>
+        <span id="keyboard-iso">
+          W/↑ ↓/S: Pan up/down<br/>
+          A/← →/D: Pan left/right<br/>
+          +/- : Zoom in/out<br/>
+          Q/E: Rotate view<br/>
+        </span><span id="keyboard-fps" style="display:none">
+          W/↑: Move forward<br/>
+          S/↓: Move backward<br/>
+          A/←: Strafe left<br/>
+          D/→: Strafe right<br/>
+          Q/Space: Move up<br/>
+          E/Ctrl: Move down<br/>
+          Shift: Sprint<br/>
+        </span>
+        R: Reset view<br/>
+        <b>T: Toggle FPS Mode</b>
+      </p>
+    </div>
+  </aside>
+
+  <main id="main">
+    <button id="toggle-sidebar">☰</button>
+    <canvas id="glcanvas"></canvas>
+    <div id="drop-overlay"><p><strong>Drop point cloud</strong>PLY, LAS, LAZ, XYZ, TXT, PTS</p></div>
+    <div id="hud"></div>
+    <div id="minimap"><canvas id="minimap-canvas" width="140" height="140"></canvas></div>
+    <div id="measure-info"></div>
+    <div id="loading"><div class="spinner"></div><span id="loading-text">Loading point cloud…</span></div>
+  </main>
+</div>
+
+<script type="module" src="script_js/main/main.js"></script>
+</body>
+</html>
