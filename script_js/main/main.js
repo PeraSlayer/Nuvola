@@ -169,6 +169,7 @@ class App {
 
     this._disposed = false;
     this._loading = false;
+    this._activeWorker = null;
     this._abortController = new AbortController();
 
     this._bindInput();
@@ -595,7 +596,6 @@ class App {
     this._bindInput();
 
     if (this.cloud) {
-      this.renderer.dispose();
       this.cloud.dispose();
       this.cloud = null;
     }
@@ -639,13 +639,17 @@ class App {
         const workerUrl = URL.createObjectURL(blob);
         const worker = new Worker(workerUrl);
 
+        this._activeWorker = worker;
+
         const timeout = setTimeout(() => {
+          this._activeWorker = null;
           worker.terminate();
           URL.revokeObjectURL(workerUrl);
           reject(new Error('Worker timeout: LOD building took too long'));
         }, 60000);
 
         worker.onmessage = (e) => {
+          this._activeWorker = null;
           clearTimeout(timeout);
           worker.terminate();
           URL.revokeObjectURL(workerUrl);
@@ -653,6 +657,7 @@ class App {
           else resolve(e.data);
         };
         worker.onerror = (e) => {
+          this._activeWorker = null;
           clearTimeout(timeout);
           worker.terminate();
           URL.revokeObjectURL(workerUrl);
@@ -721,6 +726,7 @@ class App {
     } catch (err) {
       console.error(err);
       alert(`Failed to load ${format} file: ${err.message}`);
+      this.renderer._ensureResources();
     } finally {
       data = null;
       procResult = null;
@@ -832,12 +838,20 @@ class App {
   dispose() {
     this._disposed = true;
     this._abortController.abort();
+    if (this._activeWorker) {
+      this._activeWorker.terminate();
+      this._activeWorker = null;
+    }
     this.renderer.dispose();
     if (this.cloud) {
       this.cloud.dispose();
       this.cloud = null;
     }
     this.minimap.clearCache();
+    if (this.overlayCanvas && this.overlayCanvas.parentNode) {
+      this.overlayCanvas.parentNode.removeChild(this.overlayCanvas);
+      this.overlayCanvas = null;
+    }
     this.plyLoader.dispose();
     this.lasLoader.dispose();
     this.xyzLoader.dispose();
