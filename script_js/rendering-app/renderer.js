@@ -1,14 +1,9 @@
-import { Camera } from '../model/camera.js';
-import { FPSCamera } from '../model/fps-camera.js';
 import {
   POINT_VERTEX_SHADER,
   POINT_FRAGMENT_SHADER,
   QUAD_VERTEX_SHADER,
   LIGHT_FRAGMENT_SHADER,
 } from './shader.js';
-
-const MAX_VISIBLE = 5_000_000;
-const RENDERER_VERSION = '2.0.0';
 
 const COLOR_MODE_VALUE = Object.freeze({
   rgb: 0,
@@ -39,14 +34,16 @@ class UniformGuard {
   }
 
   uniform2fv(loc, key, val) {
-    if (this.refs.get(key) === val) return;
-    this.refs.set(key, val);
+    const prev = this.refs.get(key);
+    if (prev && prev.length === 2 && prev[0] === val[0] && prev[1] === val[1]) return;
+    this.refs.set(key, new Float32Array(val));
     this.gl.uniform2fv(loc, val);
   }
 
   uniform3fv(loc, key, val) {
-    if (this.refs.get(key) === val) return;
-    this.refs.set(key, val);
+    const prev = this.refs.get(key);
+    if (prev && prev.length === 3 && prev[0] === val[0] && prev[1] === val[1] && prev[2] === val[2]) return;
+    this.refs.set(key, new Float32Array(val));
     this.gl.uniform3fv(loc, val);
   }
 }
@@ -63,35 +60,30 @@ export class Renderer {
 
     this.width = 0;
     this.height = 0;
-    this.depthAtlas = null;
 
     this._cloud = null;
     this._cloudVao = null;
-    this._lastLOD = null;
     this._lastDrawCount = 0;
     this._gpuBytes = 0;
     this._depthRB = null;
     this._fboValid = false;
     this._lightTexel = [1, 1];
-    this._atlasResolution = [256, 256];
-    this._atlasPan = [128, 128];
-
-    this.pointSizeFactor = 0.6;
 
     this._dynamicIndexBuf = null;
     this._dynamicIndexVao = null;
     this._dynamicIndexBufSize = 0;
-    this._cullIndices = null;
 
-    this._benchPointMs = 0;
-    this._benchCullMs = 0;
-
-    this._uniformState = {};
-    this._lightState = {};
+    this._benchFrameMs = 0;
+    this._contextLost = false;
 
     this._initShaders();
     this._initBuffers();
     this._initFBO();
+
+    this._onContextLost = (e) => { e.preventDefault(); this._contextLost = true; };
+    this._onContextRestored = () => { this._contextLost = false; this._initShaders(); this._initBuffers(); this._initFBO(); if (this.width > 0) this._setupFBO(this.width, this.height); };
+    canvas.addEventListener('webglcontextlost', this._onContextLost);
+    canvas.addEventListener('webglcontextrestored', this._onContextRestored);
   }
 
   _requireResource(resource, label) {
@@ -125,14 +117,17 @@ export class Renderer {
   _initShaders() {
     const gl = this.gl;
 
-    this.progPoint = this._link(
-      this._compile(gl.VERTEX_SHADER, POINT_VERTEX_SHADER),
-      this._compile(gl.FRAGMENT_SHADER, POINT_FRAGMENT_SHADER)
-    );
-    this.progLight = this._link(
-      this._compile(gl.VERTEX_SHADER, QUAD_VERTEX_SHADER),
-      this._compile(gl.FRAGMENT_SHADER, LIGHT_FRAGMENT_SHADER)
-    );
+    const vsPoint = this._compile(gl.VERTEX_SHADER, POINT_VERTEX_SHADER);
+    const fsPoint = this._compile(gl.FRAGMENT_SHADER, POINT_FRAGMENT_SHADER);
+    this.progPoint = this._link(vsPoint, fsPoint);
+    gl.deleteShader(vsPoint);
+    gl.deleteShader(fsPoint);
+
+    const vsQuad = this._compile(gl.VERTEX_SHADER, QUAD_VERTEX_SHADER);
+    const fsLight = this._compile(gl.FRAGMENT_SHADER, LIGHT_FRAGMENT_SHADER);
+    this.progLight = this._link(vsQuad, fsLight);
+    gl.deleteShader(vsQuad);
+    gl.deleteShader(fsLight);
 
     this.uPoint = {
       resolution: gl.getUniformLocation(this.progPoint, 'u_resolution'),
@@ -150,12 +145,9 @@ export class Renderer {
       iMin: gl.getUniformLocation(this.progPoint, 'u_iMin'),
       iMax: gl.getUniformLocation(this.progPoint, 'u_iMax'),
       colorMode: gl.getUniformLocation(this.progPoint, 'u_colorMode'),
-      fpsMode: gl.getUniformLocation(this.progPoint, 'u_fpsMode'),
       useCloudTransform: gl.getUniformLocation(this.progPoint, 'u_useCloudTransform'),
       cloudRot: gl.getUniformLocation(this.progPoint, 'u_cloudRot'),
       cloudScale: gl.getUniformLocation(this.progPoint, 'u_cloudScale'),
-      mvpMatrix: gl.getUniformLocation(this.progPoint, 'u_mvpMatrix'),
-      pointSize: gl.getUniformLocation(this.progPoint, 'u_pointSize'),
     };
 
     this.uLight = {
@@ -203,6 +195,26 @@ export class Renderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
+  _setupFBO(w, h) {
+    const gl = this.gl;
+    this._configureRGBA8Texture(this.colorTex, w, h);
+    this._configureRGBA8Texture(this.depthTex, w, h);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.colorTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this.depthTex, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+
+    if (this._depthRB) gl.deleteRenderbuffer(this._depthRB);
+    this._depthRB = this._requireResource(gl.createRenderbuffer(), 'depth renderbuffer');
+    gl.bindRenderbuffer(gl.RENDERBUFFER, this._depthRB);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this._depthRB);
+
+    this._fboValid = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
   resize(w, h) {
     const dpr = this._devicePixelRatio();
     const nw = Math.max(1, Math.floor(w * dpr));
@@ -218,30 +230,25 @@ export class Renderer {
     this.canvas.style.width = `${w}px`;
     this.canvas.style.height = `${h}px`;
 
-    const gl = this.gl;
+    this._setupFBO(this.width, this.height);
+  }
 
-    this._configureRGBA8Texture(this.colorTex, this.width, this.height);
-    this._configureRGBA8Texture(this.depthTex, this.width, this.height);
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.colorTex, 0);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this.depthTex, 0);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-
-    if (this._depthRB) gl.deleteRenderbuffer(this._depthRB);
-    this._depthRB = this._requireResource(gl.createRenderbuffer(), 'depth renderbuffer');
-    gl.bindRenderbuffer(gl.RENDERBUFFER, this._depthRB);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, this.width, this.height);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this._depthRB);
-
-    this._fboValid = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  _ensureResources() {
+    if (this.progPoint && this.progLight) return;
+    this._initShaders();
+    this._initBuffers();
+    this._initFBO();
+    if (this.width > 0 && this.height > 0) {
+      this._setupFBO(this.width, this.height);
+    }
   }
 
   uploadPointCloud(cloud) {
+    this._ensureResources();
     const gl = this.gl;
     this._disposeCloudVAOs();
     this._cloud = cloud;
+    this._lastDrawCount = 0;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vboPos);
     gl.bufferData(gl.ARRAY_BUFFER, cloud.positions, gl.STATIC_DRAW);
@@ -257,15 +264,6 @@ export class Renderer {
     this._gpuBytes = cloud.getGPUByteSize();
     this._cloudVao = this._createCloudVAO(cloud);
 
-    for (const lod of cloud.lodLevels) {
-      if (!lod.indices) continue;
-      if (lod.indices.length > 5_000_000) continue;
-      lod._gpuBuf = this._requireResource(gl.createBuffer(), 'LOD index buffer');
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lod._gpuBuf);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lod.indices, gl.STATIC_DRAW);
-      lod._gpuVao = this._createCloudVAO(cloud, lod._gpuBuf);
-    }
-
     if (this._dynamicIndexVao) gl.deleteVertexArray(this._dynamicIndexVao);
     if (this._dynamicIndexBuf) gl.deleteBuffer(this._dynamicIndexBuf);
     this._dynamicIndexVao = this._createCloudVAO(cloud);
@@ -276,27 +274,9 @@ export class Renderer {
     this._dynamicIndexBufSize = 4;
 
     gl.bindVertexArray(null);
-  }
 
-  uploadGaussianCloud(cloud) {
-    const gl = this.gl;
-    this._disposeCloudVAOs();
-    this._cloud = cloud;
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboPos);
-    gl.bufferData(gl.ARRAY_BUFFER, cloud.positions, gl.STATIC_DRAW);
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboCol);
-    gl.bufferData(gl.ARRAY_BUFFER, cloud.colors, gl.STATIC_DRAW);
-
-    this._gpuBytes = cloud.getGPUByteSize();
-    this._cloudVao = this._createCloudVAO(cloud);
-
-    gl.bindVertexArray(null);
-  }
-
-  renderSplats(camera, cloud, opts = {}) {
-    return 0;
+    cloud.colors = null;
+    cloud.intensity = null;
   }
 
   _disposeCloudVAOs() {
@@ -305,29 +285,33 @@ export class Renderer {
     if (this._dynamicIndexVao) { gl.deleteVertexArray(this._dynamicIndexVao); this._dynamicIndexVao = null; }
     if (this._dynamicIndexBuf) { gl.deleteBuffer(this._dynamicIndexBuf); this._dynamicIndexBuf = null; }
     this._dynamicIndexBufSize = 0;
-    this._cullIndices = null;
-
-    if (!this._cloud) return;
-    for (const lod of this._cloud.lodLevels) {
-      if (lod._gpuVao) { gl.deleteVertexArray(lod._gpuVao); lod._gpuVao = null; }
-      if (lod._gpuBuf) { gl.deleteBuffer(lod._gpuBuf); lod._gpuBuf = null; }
-    }
   }
 
   dispose() {
     const gl = this.gl;
+    this.canvas.removeEventListener('webglcontextlost', this._onContextLost);
+    this.canvas.removeEventListener('webglcontextrestored', this._onContextRestored);
     this._disposeCloudVAOs();
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboPos);
-    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboCol);
-    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vboInt);
-    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    if (this.vboPos)  { gl.deleteBuffer(this.vboPos);  this.vboPos = null; }
+    if (this.vboCol)  { gl.deleteBuffer(this.vboCol);  this.vboCol = null; }
+    if (this.vboInt)  { gl.deleteBuffer(this.vboInt);  this.vboInt = null; }
+    if (this._quadVao) { gl.deleteVertexArray(this._quadVao); this._quadVao = null; }
+
+    if (this.fbo)      { gl.deleteFramebuffer(this.fbo);    this.fbo = null; }
+    if (this.colorTex) { gl.deleteTexture(this.colorTex);   this.colorTex = null; }
+    if (this.depthTex) { gl.deleteTexture(this.depthTex);   this.depthTex = null; }
+    if (this._depthRB) { gl.deleteRenderbuffer(this._depthRB); this._depthRB = null; }
+
+    if (this.progPoint) { gl.deleteProgram(this.progPoint); this.progPoint = null; }
+    if (this.progLight) { gl.deleteProgram(this.progLight); this.progLight = null; }
 
     this._cloud = null;
     this._gpuBytes = 0;
+    this._lastDrawCount = 0;
+    this._pointUniforms = null;
+    this._lightUniforms = null;
+    this._fboValid = false;
   }
 
   getMemoryMB() {
@@ -340,24 +324,7 @@ export class Renderer {
   }
 
   getBench() {
-    return { pointMs: this._benchPointMs, cullMs: this._benchCullMs };
-  }
-
-  getStats(cloud, camera) {
-    const memMB = this.getMemoryMB();
-    const bench = this.getBench();
-    const lod = this._lastLOD || {};
-    return {
-      modelPoints: cloud ? cloud.count : 0,
-      lodLevel: lod.level != null ? lod.level : '—',
-      lodCandidateCount: lod.count || 0,
-      submittedCount: this._lastDrawCount || 0,
-      hardCap: MAX_VISIBLE,
-      drawPasses: 2,
-      gpuMemMB: memMB,
-      gpuMemLabel: 'estimated',
-      bench,
-    };
+    return { frameMs: this._benchFrameMs };
   }
 
   _createCloudVAO(cloud, indexBuffer = null) {
@@ -374,11 +341,11 @@ export class Renderer {
     gl.enableVertexAttribArray(this.attrCol);
     gl.vertexAttribPointer(this.attrCol, 3, gl.UNSIGNED_BYTE, true, 0, 0);
 
-    if (cloud.intensity) {
+    if (cloud.intensity && this.attrInt >= 0) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.vboInt);
       gl.enableVertexAttribArray(this.attrInt);
       gl.vertexAttribPointer(this.attrInt, 1, gl.FLOAT, false, 0, 0);
-    } else {
+    } else if (this.attrInt >= 0) {
       gl.disableVertexAttribArray(this.attrInt);
       gl.vertexAttrib1f(this.attrInt, 0.5);
     }
@@ -388,85 +355,9 @@ export class Renderer {
     return vao;
   }
 
-  _cullScreenSpace(lod, camera, w, h, cloud, cloudTransform) {
-    const t0 = performance.now();
-    const positions = cloud.positions;
-    const center = cloud.center;
-    const indices = lod.indices;
-    const srcCount = indices ? Math.min(indices.length, lod.count) : lod.count;
 
-    const panX = camera.panX, panY = camera.panY;
-    const zoomVal = camera.zoom;
-    const angle = camera._rotAngle || 0;
-    const cosA = Math.cos(angle), sinA = Math.sin(angle);
 
-    const rotX = camera.rotationXDeg * Math.PI / 180;
-    const rotY = camera.rotationYDeg * Math.PI / 180;
-    const rotZ = camera.rotationZDeg * Math.PI / 180;
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
-    const skipX = cosX === 1 && sinX === 0;
-    const skipY = cosY === 1 && sinY === 0;
-    const skipZ = cosZ === 1 && sinZ === 0;
-
-    let useCloudXform = false;
-    let cRx = 1, sRx = 0, cRy = 1, sRy = 0, cRz = 1, sRz = 0;
-    let scX = 1, scY = 1, scZ = 1;
-    if (cloudTransform && !cloudTransform.isIdentity) {
-      useCloudXform = true;
-      const rx = cloudTransform.rotation[0] * Math.PI / 180;
-      const ry = cloudTransform.rotation[1] * Math.PI / 180;
-      const rz = cloudTransform.rotation[2] * Math.PI / 180;
-      cRx = Math.cos(rx); sRx = Math.sin(rx);
-      cRy = Math.cos(ry); sRy = Math.sin(ry);
-      cRz = Math.cos(rz); sRz = Math.sin(rz);
-      scX = cloudTransform.scale[0];
-      scY = cloudTransform.scale[1];
-      scZ = cloudTransform.scale[2];
-    }
-
-    const cx = center[0], cy = center[1], cz = center[2];
-    const margin = 40;
-
-    if (!this._cullIndices || this._cullIndices.length < srcCount) {
-      this._cullIndices = new Uint32Array(Math.max(srcCount, this._cullIndices ? this._cullIndices.length * 2 : 1024));
-    }
-
-    let visibleCount = 0;
-    const limit = Math.min(srcCount, MAX_VISIBLE);
-
-    for (let j = 0; j < limit; j++) {
-      const i = indices ? indices[j] : j;
-      let lx = positions[i*3] - cx, ly = positions[i*3+1] - cy, lz = positions[i*3+2] - cz;
-
-      if (useCloudXform) {
-        lx *= scX; ly *= scY; lz *= scZ;
-        const y1 = ly*cRx - lz*sRx; const z1 = ly*sRx + lz*cRx; ly = y1; lz = z1;
-        const x1 = lx*cRy + lz*sRy; const z2 = -lx*sRy + lz*cRy; lx = x1; lz = z2;
-        const x2 = lx*cRz - ly*sRz; const y2 = lx*sRz + ly*cRz; lx = x2; ly = y2;
-      }
-
-      if (!skipX) { const y1 = ly*cosX - lz*sinX; const z1 = ly*sinX + lz*cosX; ly = y1; lz = z1; }
-      if (!skipY) { const x1 = lx*cosY + lz*sinY; const z2 = -lx*sinY + lz*cosY; lx = x1; lz = z2; }
-      if (!skipZ) { const x2 = lx*cosZ - ly*sinZ; const y2 = lx*sinZ + ly*cosZ; lx = x2; ly = y2; }
-
-      const rx = lx*cosA - ly*sinA;
-      const ry = lx*sinA + ly*cosA;
-
-      const sx = (rx - ry)*zoomVal + panX;
-      const sy = ((rx + ry)*0.5 - lz)*zoomVal + panY;
-
-      if (sx >= -margin && sx <= w + margin && sy >= -margin && sy <= h + margin) {
-        this._cullIndices[visibleCount++] = i;
-      }
-    }
-
-    this._benchCullMs = performance.now() - t0;
-    return { indices: this._cullIndices.subarray(0, visibleCount), count: visibleCount };
-  }
-
-  _uploadDynamicIndices(indices, count) {
+  _uploadDynamicIndices(buf, count) {
     const gl = this.gl;
     const needed = count * 4;
     if (needed > this._dynamicIndexBufSize) {
@@ -476,7 +367,7 @@ export class Renderer {
       this._dynamicIndexBufSize = cap;
     }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._dynamicIndexBuf);
-    gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, indices.subarray ? indices.subarray(0, count) : indices);
+    gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, buf);
   }
 
   _applyCameraUniforms(camera, cloud) {
@@ -500,26 +391,8 @@ export class Renderer {
     apply.uniform1f(up.iMax, 'point.iMax', u.u_iMax);
   }
 
-  _applyFPSCameraUniforms(fpsCamera, cloud) {
-    const gl = this.gl;
-    const mvp = fpsCamera.getMVP(this.width, this.height);
-    gl.uniformMatrix4fv(this.uPoint.mvpMatrix, false, mvp);
-    this._pointUniforms.uniform1f(this.uPoint.pointSize, 'point.fpsSize', 3.0);
-
-    const zMin = cloud ? cloud.zMin - cloud.center[2] : 0;
-    const zMax = cloud ? cloud.zMax - cloud.center[2] : 1;
-    const center = cloud ? cloud.center : [0, 0, 0];
-    const iMin = cloud && cloud.intensity ? cloud.intensityMin : 0;
-    const iMax = cloud && cloud.intensity ? cloud.intensityMax : 1;
-
-    this._pointUniforms.uniform3fv(this.uPoint.center, 'point.fpsCenter', center);
-    this._pointUniforms.uniform1f(this.uPoint.zMin, 'point.fpsZMin', zMin);
-    this._pointUniforms.uniform1f(this.uPoint.zMax, 'point.fpsZMax', zMax);
-    this._pointUniforms.uniform1f(this.uPoint.iMin, 'point.fpsIMin', iMin);
-    this._pointUniforms.uniform1f(this.uPoint.iMax, 'point.fpsIMax', iMax);
-  }
-
   render(camera, cloud, opts = {}) {
+    if (this._contextLost) return 0;
     const t0 = performance.now();
     if (!cloud || !this._fboValid || !this._cloudVao) return 0;
 
@@ -528,22 +401,10 @@ export class Renderer {
     const lightDir = opts.lightDir || DEFAULT_LIGHT_DIR;
     const ambient = opts.ambient != null ? opts.ambient : 0.25;
     const shading = opts.shading !== false;
-    const decimationOptions = opts.decimationOptions || {};
-    const fpsMode = !!opts.fpsMode;
-    const fpsCamera = opts.fpsCamera || null;
-    const enableCulling = opts.enableCulling !== false;
-    const cloudTransform = opts.cloudTransform || null;
 
-    const zoomRatio = camera.zoom / (camera._defaultZoom || 1);
-    const lod = cloud.selectLOD(zoomRatio, decimationOptions);
-
-    const drawLOD = (!fpsMode && enableCulling && lod.count > 20000)
-      ? this._cullScreenSpace(lod, camera, this.width, this.height, cloud, cloudTransform)
-      : lod;
-
-    const drawCount = Math.min(drawLOD.count, MAX_VISIBLE);
-    const hasIndices = !!drawLOD.indices;
-    const hasStaticVAO = drawLOD._gpuVao;
+    const drawCall = cloud.getDrawCall(camera, this.width, this.height);
+    const drawCount = drawCall.count;
+    const hasIndices = !!drawCall.indices;
     const modeVal = COLOR_MODE_VALUE[colorMode] != null ? COLOR_MODE_VALUE[colorMode] : 0;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
@@ -554,30 +415,14 @@ export class Renderer {
 
     gl.useProgram(this.progPoint);
 
-    if (fpsMode && fpsCamera) {
-      this._applyFPSCameraUniforms(fpsCamera, cloud);
-      this._pointUniforms.uniform1i(this.uPoint.fpsMode, 'point.fpsMode', 1);
-    } else {
-      this._applyCameraUniforms(camera, cloud);
-      this._pointUniforms.uniform1i(this.uPoint.fpsMode, 'point.fpsMode', 0);
-    }
+    this._applyCameraUniforms(camera, cloud);
     this._pointUniforms.uniform1i(this.uPoint.colorMode, 'point.colorMode', modeVal);
 
-    if (cloudTransform && !cloudTransform.isIdentity) {
-      const r = cloudTransform.rotation;
-      const s = cloudTransform.scale;
-      gl.uniform1i(this.uPoint.useCloudTransform, 1);
-      gl.uniform3f(this.uPoint.cloudRot, r[0] * Math.PI / 180, r[1] * Math.PI / 180, r[2] * Math.PI / 180);
-      gl.uniform3f(this.uPoint.cloudScale, s[0], s[1], s[2]);
-    } else {
-      gl.uniform1i(this.uPoint.useCloudTransform, 0);
-    }
+    gl.uniform1i(this.uPoint.useCloudTransform, 0);
 
-    if (hasIndices && !hasStaticVAO) {
+    if (hasIndices) {
       gl.bindVertexArray(this._dynamicIndexVao);
-      this._uploadDynamicIndices(drawLOD.indices, drawCount);
-    } else if (hasIndices && hasStaticVAO) {
-      gl.bindVertexArray(drawLOD._gpuVao);
+      this._uploadDynamicIndices(drawCall.indices, drawCount);
     } else {
       gl.bindVertexArray(this._cloudVao);
     }
@@ -606,7 +451,6 @@ export class Renderer {
 
     gl.depthFunc(gl.LEQUAL);
     gl.depthMask(true);
-    gl.enable(gl.BLEND);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
@@ -629,109 +473,10 @@ export class Renderer {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    this._lastLOD = lod;
     this._lastDrawCount = drawCount;
-    this._benchPointMs = performance.now() - t0;
+    this._benchFrameMs = performance.now() - t0;
 
     return drawCount;
   }
 
-  generateDepthAtlas(cloud, numViews = 4) {
-    if (!this._fboValid || !this._cloudVao) return;
-
-    const gl = this.gl;
-    const atlasSize = 256;
-    const atlasPixelCount = atlasSize * atlasSize;
-    const atlas = new Float32Array(atlasPixelCount * numViews);
-    const colorAtlas = new Uint8Array(atlasPixelCount * numViews * 4);
-
-    const tmpFbo = this._requireResource(gl.createFramebuffer(), 'atlas framebuffer');
-    const tmpColor = this._requireResource(gl.createTexture(), 'atlas color texture');
-    const tmpDepth = this._requireResource(gl.createTexture(), 'atlas depth texture');
-    const tmpRB = this._requireResource(gl.createRenderbuffer(), 'atlas depth renderbuffer');
-
-    try {
-      this._configureRGBA8Texture(tmpColor, atlasSize, atlasSize);
-      this._configureRGBA8Texture(tmpDepth, atlasSize, atlasSize);
-
-      gl.bindFramebuffer(gl.FRAMEBUFFER, tmpFbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tmpColor, 0);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, tmpDepth, 0);
-      gl.bindRenderbuffer(gl.RENDERBUFFER, tmpRB);
-      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, atlasSize, atlasSize);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, tmpRB);
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return;
-
-      const pixels = new Uint8Array(atlasPixelCount * 4);
-      const depthPixels = new Uint8Array(atlasPixelCount * 4);
-      const span = Math.max(
-        cloud.bounds.max[0] - cloud.bounds.min[0],
-        cloud.bounds.max[1] - cloud.bounds.min[1],
-        1
-      );
-
-      gl.viewport(0, 0, atlasSize, atlasSize);
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.useProgram(this.progPoint);
-      gl.bindVertexArray(this._cloudVao);
-
-      for (let v = 0; v < numViews; v++) {
-        const rotAngle = (v / numViews) * Math.PI * 2;
-        const dr = Camera.depthRange(cloud, rotAngle);
-
-        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-        const apply = this._pointUniforms;
-        const up = this.uPoint;
-        apply.uniform1i(up.fpsMode, 'point.atlasFps', 0);
-        gl.uniform1i(up.useCloudTransform, 0);
-        apply.uniform2fv(up.resolution, 'point.resolution', this._atlasResolution);
-        apply.uniform2fv(up.pan, 'point.pan', this._atlasPan);
-        apply.uniform3fv(up.center, 'point.center', cloud.center);
-        apply.uniform1f(up.zoom, 'point.zoom', (atlasSize / span) * 0.8);
-        apply.uniform1f(up.rot, 'point.rot', rotAngle);
-        apply.uniform1f(up.rotX, 'point.rotX', 0);
-        apply.uniform1f(up.rotY, 'point.rotY', 0);
-        apply.uniform1f(up.rotZ, 'point.rotZ', 0);
-        apply.uniform1f(up.zMin, 'point.zMin', cloud.zMin - cloud.center[2]);
-        apply.uniform1f(up.zMax, 'point.zMax', cloud.zMax - cloud.center[2]);
-        apply.uniform1f(up.depthMin, 'point.depthMin', dr.min);
-        apply.uniform1f(up.depthMax, 'point.depthMax', dr.max);
-        apply.uniform1f(up.iMin, 'point.iMin', cloud.intensityMin);
-        apply.uniform1f(up.iMax, 'point.iMax', cloud.intensityMax);
-        apply.uniform1i(up.colorMode, 'point.colorMode', 0);
-
-        gl.drawArrays(gl.POINTS, 0, Math.min(cloud.count, 100000));
-
-        gl.readBuffer(gl.COLOR_ATTACHMENT1);
-        gl.readPixels(0, 0, atlasSize, atlasSize, gl.RGBA, gl.UNSIGNED_BYTE, depthPixels);
-
-        const base = v * atlasPixelCount;
-        for (let i = 0; i < atlasPixelCount; i++) {
-          atlas[base + i] = depthPixels[i * 4] / 255;
-        }
-
-        gl.readBuffer(gl.COLOR_ATTACHMENT0);
-        gl.readPixels(0, 0, atlasSize, atlasSize, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        colorAtlas.set(pixels, v * atlasPixelCount * 4);
-      }
-
-      this.depthAtlas = {
-        size: atlasSize,
-        views: numViews,
-        depth: atlas,
-        color: colorAtlas,
-      };
-    } finally {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.bindVertexArray(null);
-      gl.deleteRenderbuffer(tmpRB);
-      gl.deleteTexture(tmpDepth);
-      gl.deleteTexture(tmpColor);
-      gl.deleteFramebuffer(tmpFbo);
-    }
-  }
 }

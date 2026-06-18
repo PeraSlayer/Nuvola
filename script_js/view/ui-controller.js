@@ -50,8 +50,8 @@ export class UIController {
     };
 
     // --- Rotation ----------------------------------------------------------
-    $('btn-rot-left').onclick  = () => { a.camera.rotateLeft();  if (a.cloud || a.gaussianCloud) a._fitView(); };
-    $('btn-rot-right').onclick = () => { a.camera.rotateRight(); if (a.cloud || a.gaussianCloud) a._fitView(); };
+    $('btn-rot-left').onclick  = () => { a.camera.rotateLeft();  if (a.cloud) a._fitView(); };
+    $('btn-rot-right').onclick = () => { a.camera.rotateRight(); if (a.cloud) a._fitView(); };
 
     $('rot-offset').oninput = (e) => {
       a.camera.setViewOffset(+e.target.value);
@@ -59,7 +59,7 @@ export class UIController {
       a.camera.markDirty();
     };
     $('rot-offset').onchange = () => {
-      if (a.cloud || a.gaussianCloud) a._fitView();
+      if (a.cloud) a._fitView();
       $('zoom-slider').value = a.camera.zoom;
       $('zoom-val').textContent = a.camera.zoom.toFixed(1);
     };
@@ -148,22 +148,6 @@ export class UIController {
     };
     $('btn-clear-measure').onclick = () => a.clearMeasurement();
 
-    // --- Gaussian Splat toggle --------------------------------------------
-    if ($('chk-gaussian')) {
-      $('chk-gaussian').onchange = () => {
-        a.toggleGaussianMode();
-      };
-    }
-
-    // --- Gaussian Density control -------------------------------------------
-    if ($('gaussian-density')) {
-      $('gaussian-density').oninput = (e) => {
-        a.gaussianDensity = +e.target.value;
-        $('gaussian-density-val').textContent = a.gaussianDensity.toFixed(1) + '×';
-        a.camera.markDirty();
-      };
-    }
-
     // --- Mobile sidebar toggle --------------------------------------------
     $('toggle-sidebar').onclick = () => $('sidebar').classList.toggle('open');
 
@@ -180,37 +164,13 @@ export class UIController {
     });
   }
 
-  /** Update the stats panel with current FPS, LOD count, and total points. */
+  /** Update the stats panel with current FPS, draw count, and total points. */
   updateStats(fps, lodCount, totalCount) {
-    const a = this.app;
-    const r = a.renderer;
-
-    if (a.gaussianMode) {
-      const mem = r ? r.getMemoryMB() : '—';
-      const densityInfo = `Density: <b>${(a.gaussianDensity * 100).toFixed(0)}%</b><br/>`;
-      document.getElementById('stats-info').innerHTML =
-        `Points: <b>${totalCount.toLocaleString()}</b><br/>` +
-        `Rendering: <b>${(lodCount || 0).toLocaleString()} (Gaussian)</b><br/>` +
-        densityInfo +
-        `FPS: <b>${fps.toFixed(0)}</b><br/>` +
-        `GPU Mem: <b>${mem} MB (est.)</b>`;
-      return;
-    }
-
-    const stats = r ? r.getStats(a.cloud, a.camera) : null;
-    if (!stats) return;
-
-    const capLine = stats.submittedCount >= stats.hardCap
-      ? `<br/>Cap: <b>${stats.hardCap.toLocaleString()}</b>` : '';
-
+    const memMB = this.app.renderer ? this.app.renderer.getMemoryMB() : '—';
     document.getElementById('stats-info').innerHTML =
       `Points: <b>${totalCount.toLocaleString()}</b><br/>` +
-      `Rendering: <b>${stats.submittedCount.toLocaleString()}</b> (LOD ${stats.lodLevel})` +
-      (stats.lodCandidateCount !== stats.submittedCount
-        ? ` of ${stats.lodCandidateCount.toLocaleString()}` : '') +
-      `${capLine}<br/>` +
-      `Passes: <b>${stats.drawPasses}</b> (depth + color)<br/>` +
+      `Rendering: <b>${lodCount.toLocaleString()}</b><br/>` +
       `FPS: <b>${fps.toFixed(0)}</b><br/>` +
-      `GPU Mem: <b>${stats.gpuMemMB} MB (${stats.gpuMemLabel})</b>`;
+      `GPU Mem: <b>${memMB} MB (estimated)</b>`;
   }
 }

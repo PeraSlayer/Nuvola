@@ -9,7 +9,7 @@ in una singola classe App.
 
 Il file gestisce il ciclo di vita principale: selezione o drag-and-drop dei
 file, riconoscimento del formato, caricamento dei dati, decompressione LAZ,
-creazione della PointCloud o della GaussianCloud, inizializzazione della vista,
+creazione della PointCloud, inizializzazione della vista,
 aggiornamento dei pannelli UI e render loop. Contiene anche un worker inline
 che prepara dati pesanti come bounds, centro, livelli LOD, tile e griglia di
 picking senza bloccare il thread principale del browser.
@@ -25,9 +25,7 @@ import { decompressLAZ }   from '../file_loader/laz-decompressor.js';
 import { XYZLoader }       from '../file_loader/xyz-loader.js';
 import { RXPLoader }       from '../file_loader/rxp-loader.js';
 import { PointCloud }      from '../model/PointCloud.js';
-import { GaussianCloud }   from '../model/gaussian-cloud.js';
 import { Camera }          from '../model/camera.js';
-import { FPSCamera }       from '../model/fps-camera.js';
 import { CloudTransform }  from '../model/transform.js';
 import { Gizmo }           from '../view/gizmo.js';
 import { Renderer }        from '../rendering-app/renderer.js';
@@ -54,7 +52,39 @@ async function _readLASFile(file, format) {
   return buf;
 }
 
-const APP_WORKER_CODE = `
+const APP_OCTREE_WORKER = `
+function _octBuild(positions, indices, bounds, depth, maxDepth, leafSize) {
+  var count = indices.length;
+  var node = { min:[bounds[0],bounds[1],bounds[2]], max:[bounds[3],bounds[4],bounds[5]], depth:depth, count:count, indices:null, children:null };
+  if (count <= leafSize || depth >= maxDepth) { node.indices = indices; return node; }
+  var mx = (bounds[0]+bounds[3])*0.5, my = (bounds[1]+bounds[4])*0.5, mz = (bounds[2]+bounds[5])*0.5;
+  var c0=[],c1=[],c2=[],c3=[],c4=[],c5=[],c6=[],c7=[];
+  for (var j = 0; j < count; j++) {
+    var idx = indices[j];
+    var px = positions[idx*3], py = positions[idx*3+1], pz = positions[idx*3+2];
+    var ci = ((px<mx?0:1)<<2)|((py<my?0:1)<<1)|(pz<mz?0:1);
+    if (ci===0){c0.push(idx)}else if(ci===1){c1.push(idx)}else if(ci===2){c2.push(idx)}else if(ci===3){c3.push(idx)}else if(ci===4){c4.push(idx)}else if(ci===5){c5.push(idx)}else if(ci===6){c6.push(idx)}else{c7.push(idx)};
+  }
+  var cb=[[bounds[0],bounds[1],bounds[2],mx,my,mz],[mx,bounds[1],bounds[2],bounds[3],my,mz],[bounds[0],my,bounds[2],mx,bounds[4],mz],[mx,my,bounds[2],bounds[3],bounds[4],mz],[bounds[0],bounds[1],mz,mx,my,bounds[5]],[mx,bounds[1],mz,bounds[3],my,bounds[5]],[bounds[0],my,mz,mx,bounds[4],bounds[5]],[mx,my,mz,bounds[3],bounds[4],bounds[5]]];
+  var ch = [];
+  var lists = [c0,c1,c2,c3,c4,c5,c6,c7];
+  for (var k = 0; k < 8; k++) { if (lists[k].length > 0) ch.push(_octBuild(positions, new Uint32Array(lists[k]), cb[k], depth+1, maxDepth, leafSize)); }
+  node.children = ch.length > 0 ? ch : null;
+  if (!node.children) { node.indices = indices; return node; }
+  return node;
+}
+
+function buildOctree(positions, count, bounds, maxDepth, leafSize) {
+  var all = new Uint32Array(count);
+  for (var j = 0; j < count; j++) all[j] = j;
+  return _octBuild(positions, all, [bounds.min[0],bounds.min[1],bounds.min[2],bounds.max[0],bounds.max[1],bounds.max[2]], 0, maxDepth||12, leafSize||2000);
+}
+
+function collectLeafBufs(node, arr) {
+  if (node.indices) { arr.push(node.indices.buffer); return; }
+  if (node.children) { for (var k = 0; k < node.children.length; k++) collectLeafBufs(node.children[k], arr); }
+}
+
 self.onmessage = function(e) {
   try {
     var d = e.data;
@@ -72,33 +102,21 @@ self.onmessage = function(e) {
     }
     var ct = [(b.min[0]+b.max[0])*0.5,(b.min[1]+b.max[1])*0.5,(b.min[2]+b.max[2])*0.5];
     var iMin = i ? iM : 0, iMax = i ? (iX===iM?iX+1:iX) : 1;
-    var sx = b.max[0]-b.min[0]||1, sy = b.max[1]-b.min[1]||1, bs = Math.max(sx,sy);
-    var lod = [], pc = n;
-    for (var lv = 1; lv < 16; lv++) {
-      var cs = Math.pow(1.4,lv)*bs/512;
-      if (cs <= 0 || pc < 2000) break;
-      var g = new Map(), iv = 1/cs;
-      for (var j = 0; j < n; j++) {
-        var gx = ((p[j*3]-b.min[0])*iv)|0, gy = ((p[j*3+1]-b.min[1])*iv)|0, k = (gx<<16)^gy, ex = g.get(k);
-        if (ex === undefined || p[j*3+2] > p[ex*3+2]) g.set(k, j);
-      }
-      var idx = new Uint32Array(g.size), k2 = 0;
-      for (var v of g.values()) idx[k2++] = v;
-      if (idx.length >= pc*0.95) break;
-      lod.push({ indices: idx, count: idx.length });
-      pc = idx.length;
-    }
-    var tX = 4, tY = 4, tl = [];
-    for (var ty = 0; ty < tY; ty++) for (var tx = 0; tx < tX; tx++) {
-      var x0 = b.min[0]+(tx/tX)*sx, x1 = b.min[0]+((tx+1)/tX)*sx, y0 = b.min[1]+(ty/tY)*sy, y1 = b.min[1]+((ty+1)/tY)*sy, ti = [];
-      for (var j = 0; j < n; j++) { var px = p[j*3], py = p[j*3+1]; if (px>=x0&&px<x1&&py>=y0&&py<y1) ti.push(j); }
-      tl.push({ tx:tx, ty:ty, bounds:{min:[x0,y0,b.min[2]],max:[x1,y1,b.max[2]]}, indices:new Uint32Array(ti), count:ti.length });
-    }
-    var pc2 = 128, pg = new Array(pc2*pc2);
-    for (var j = 0; j < pc2*pc2; j++) pg[j] = [];
-    for (var j = 0; j < n; j++) { var gx = Math.min(pc2-1,Math.floor(((p[j*3]-b.min[0])/sx)*pc2)), gy = Math.min(pc2-1,Math.floor(((p[j*3+1]-b.min[1])/sy)*pc2)); pg[gy*pc2+gx].push(j); }
+    var octree = buildOctree(p, n, b, 12, 2000);
+
+    var pc2 = 128, pgc = pc2*pc2;
+    var sx = b.max[0]-b.min[0]||1, sy = b.max[1]-b.min[1]||1;
+    var pgCounts = new Uint32Array(pgc);
+    for (var j = 0; j < n; j++) { var gx = Math.min(pc2-1,Math.floor(((p[j*3]-b.min[0])/sx)*pc2)); var gy = Math.min(pc2-1,Math.floor(((p[j*3+1]-b.min[1])/sy)*pc2)); pgCounts[gy*pc2+gx]++; }
+    var pgOffsets = new Uint32Array(pgc+1);
+    for (var _c = 0; _c < pgc; _c++) pgOffsets[_c+1] = pgOffsets[_c] + pgCounts[_c];
+    var pgFlat = new Uint32Array(n);
+    var pgCursor = new Uint32Array(pgc);
+    for (var j = 0; j < n; j++) { var gx = Math.min(pc2-1,Math.floor(((p[j*3]-b.min[0])/sx)*pc2)); var gy = Math.min(pc2-1,Math.floor(((p[j*3+1]-b.min[1])/sy)*pc2)); var _cell = gy*pc2+gx; pgFlat[pgOffsets[_cell] + pgCursor[_cell]++] = j; }
     var tr = [p.buffer, c.buffer]; if (i) tr.push(i.buffer);
-    self.postMessage({ positions:p, colors:c, intensity:i, bounds:b, center:ct, zMin:b.min[2], zMax:b.max[2], intensityMin:iMin, intensityMax:iMax, lodLevels:lod, tilePyramid:{tilesX:tX,tilesY:tY,tiles:tl}, pickGrid:pg, pickCells:pc2 }, tr);
+    collectLeafBufs(octree, tr);
+    tr.push(pgFlat.buffer, pgOffsets.buffer, pgCounts.buffer);
+    self.postMessage({ positions:p, colors:c, intensity:i, bounds:b, center:ct, zMin:b.min[2], zMax:b.max[2], intensityMin:iMin, intensityMax:iMax, octree:octree, pickGrid:pgFlat, pickOffsets:pgOffsets, pickCounts:pgCounts, pickCells:pc2 }, tr);
   } catch(err) {
     self.postMessage({ error: err.message });
   }
@@ -122,7 +140,6 @@ class App {
 
     this.renderer    = new Renderer(this.canvas);
     this.camera      = new Camera();
-    this.fpsCamera   = new FPSCamera();
     this.measurement = new MeasurementTool();
     this.minimap     = new MiniMap(document.getElementById('minimap-canvas'));
     this.ui          = new UIController(this);
@@ -130,15 +147,11 @@ class App {
     this.gizmo         = new Gizmo();
 
     this.cloud        = null;
-    this.gaussianCloud = null;
-    this.gaussianMode  = false;
     this.colorMode    = 'rgb';
     this.lightAz      = 315;
     this.lightEl      = 45;
     this.lightAmb     = 0.25;
     this.shading      = true;
-    this.fpsMode      = false;
-    this.gaussianDensity = 1.0;
 
     this.enableRangeDecimation = true;
     this.minPointsForDetail = 50000;
@@ -155,10 +168,11 @@ class App {
     this._hudEl = document.getElementById('hud');
 
     this._disposed = false;
+    this._loading = false;
+    this._abortController = new AbortController();
 
     this._bindInput();
     this._resize();
-    window.addEventListener('resize', () => this._resize());
     requestAnimationFrame((t) => this._loop(t));
   }
 
@@ -177,7 +191,7 @@ class App {
    * Derived from the isometric camera's rotation — not the FPS camera.
    */
   _getViewDir() {
-    const angle = this.camera._rotAngle;
+    const angle = this.camera.rotAngle;
     const c = Math.cos(angle);
     const s = Math.sin(angle);
     const cx = -(c + s);
@@ -196,13 +210,13 @@ class App {
   }
 
   _fitView() {
-    const target = this.gaussianMode ? this.gaussianCloud : this.cloud;
+    const target = this.cloud;
     if (!target) return;
     const w = this.renderer.width, h = this.renderer.height;
     if (target.bounds && target.center) {
-      this.camera.fitToBounds(target, w, h, this.camera._targetAngle);
+      this.camera.fitToBounds(target, w, h);
     } else {
-      this.camera.fitToBounds(this.cloud || { bounds: {min:[0,0,0],max:[1,1,1]}, center:[0,0,0] }, w, h, this.camera._targetAngle);
+      this.camera.fitToBounds(this.cloud || { bounds: {min:[0,0,0],max:[1,1,1]}, center:[0,0,0] }, w, h);
     }
     document.getElementById('zoom-slider').value = this.camera.zoom;
     document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
@@ -213,7 +227,7 @@ class App {
     if (!this.cloud) return;
     const w = this.overlayCanvas.width, h = this.overlayCanvas.height;
     const cam = this.camera;
-    const ref = cam._refCenter;
+    const ref = cam.refCenter;
 
     const ox = cam.project(ref[0], ref[1], ref[2]);
 
@@ -287,74 +301,8 @@ class App {
     }
     cam.setView(0);
     cam.markDirty();
-    if (this.cloud || this.gaussianCloud) this._fitView();
+    if (this.cloud) this._fitView();
     this._updateViewButtons();
-  }
-
-  toggleFPSMode() {
-    this.fpsMode = !this.fpsMode;
-    const hudEl = document.getElementById('hud');
-    if (this.fpsMode) {
-      hudEl.style.display = 'none';
-      document.body.style.cursor = 'grab';
-      document.getElementById('control-title-iso').textContent = 'FPS Mode:';
-      document.getElementById('control-iso').style.display = 'none';
-      document.getElementById('control-fps').style.display = 'inline';
-      document.getElementById('keyboard-iso').style.display = 'none';
-      document.getElementById('keyboard-fps').style.display = 'inline';
-
-      this.measurement.active = false;
-      document.getElementById('btn-measure').classList.remove('active');
-      document.getElementById('btn-measure').textContent = 'Measure Distance';
-      this.gizmo.setMode('none');
-
-      if (this.cloud) {
-        const center = this.cloud.center;
-        const b = this.cloud.bounds;
-        const span = Math.max(
-          b.max[0] - b.min[0],
-          b.max[1] - b.min[1],
-          1
-        );
-        const height = b.max[2] - b.min[2] || span * 0.5;
-        const dist = span * 1.2;
-        this.fpsCamera.position = [
-          center[0] - dist * 0.5,
-          center[1] + height * 0.5 + dist * 0.4,
-          center[2] + dist * 0.5,
-        ];
-        this.fpsCamera.pitch = -Math.PI / 5;
-        this.fpsCamera.yaw = Math.PI / 4;
-        this.fpsCamera._velocity = [0, 0, 0];
-        this.fpsCamera.markDirty();
-      } else {
-        this.fpsCamera.reset();
-      }
-    } else {
-      hudEl.style.display = 'block';
-      document.body.style.cursor = 'default';
-      document.getElementById('control-title-iso').textContent = 'Isometric Mode:';
-      document.getElementById('control-iso').style.display = 'inline';
-      document.getElementById('control-fps').style.display = 'none';
-      document.getElementById('keyboard-iso').style.display = 'inline';
-      document.getElementById('keyboard-fps').style.display = 'none';
-      if (this.cloud) this._fitView();
-    }
-  }
-
-  toggleGaussianMode() {
-    this.gaussianMode = !this.gaussianMode;
-    const cb = document.getElementById('chk-gaussian');
-    if (cb) cb.checked = this.gaussianMode;
-
-    if (this.gaussianMode) {
-      if (this.fpsMode) this.toggleFPSMode();
-      if (this.cloud && !this.gaussianCloud) {
-        this.gaussianCloud = GaussianCloud.fromPointCloud(this.cloud);
-        this.renderer.uploadGaussianCloud(this.gaussianCloud);
-      }
-    }
-    this.camera.markDirty();
   }
 
   _resize() {
@@ -366,11 +314,8 @@ class App {
     this.overlayCanvas.height = this.renderer.height;
     this.overlayCanvas.style.width  = w + 'px';
     this.overlayCanvas.style.height = h + 'px';
-    this.renderer._uniformState = {};
-    this.renderer._lightState = {};
     if (this.cloud) this._fitView();
     this.camera.markDirty();
-    this.fpsCamera.markDirty();
   }
 
   _updateViewButtons() {
@@ -389,7 +334,7 @@ class App {
         this.camera.setView(i);
         grid.querySelectorAll('button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        if (this.cloud || this.gaussianCloud) this._fitView();
+        if (this.cloud) this._fitView();
       };
       grid.appendChild(btn);
     });
@@ -397,6 +342,7 @@ class App {
 
   _bindInput() {
     const c = this.canvas;
+    const signal = this._abortController.signal;
 
     c.addEventListener('mousedown', (e) => {
       if (this.measurement.active && e.button === 0) return;
@@ -415,14 +361,14 @@ class App {
       this._dragging = true;
       this._lastMouse = [e.clientX, e.clientY];
       this._dragButton = e.button;
-    });
+    }, { signal });
     window.addEventListener('mousemove', (e) => {
       if (this._dragging && e.which === 0) this._dragging = false;
-    });
+    }, { signal });
     window.addEventListener('mouseup', (e) => {
       if (this.gizmo.isActive()) this.gizmo.endDrag();
       if (e.button === this._dragButton) this._dragging = false;
-    });
+    }, { signal });
     c.addEventListener('mousemove', (e) => {
       const rect = c.getBoundingClientRect();
       const dpr = this.renderer.width / rect.width;
@@ -437,7 +383,6 @@ class App {
         this.gizmo.setHovered(this.gizmo.hitTest(sx, sy, this.camera, this.cloud));
       }
       if (!this._dragging) return;
-      if (this.fpsMode) return;
       const dx = (e.clientX - this._lastMouse[0]) * dpr;
       const dy = (e.clientY - this._lastMouse[1]) * dpr;
       this._lastMouse = [e.clientX, e.clientY];
@@ -447,13 +392,12 @@ class App {
         this.camera.markDirty();
       } else {
         this.camera.rotateHorizontal(-dx * 0.003);
-        this.camera.rotateVertical(dy * 0.15);
+        this.camera.rotateVertical(-dy * 0.15);
       }
-    });
-    c.addEventListener('contextmenu', (e) => e.preventDefault());
+    }, { signal });
+    c.addEventListener('contextmenu', (e) => e.preventDefault(), { signal });
     c.addEventListener('wheel', (e) => {
       e.preventDefault();
-      if (this.fpsMode) return;
       const rect = c.getBoundingClientRect();
       const dpr = this.renderer.width / rect.width;
       const sx = (e.clientX - rect.left) * dpr;
@@ -462,40 +406,20 @@ class App {
       this.camera.zoomAt(factor, sx, sy, this.renderer.width, this.renderer.height);
       document.getElementById('zoom-slider').value = this.camera.zoom;
       document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-    }, { passive: false });
+    }, { passive: false, signal });
 
     let lastClickTime = 0;
     c.addEventListener('dblclick', (e) => {
-      if (this.fpsMode) return;
       e.preventDefault();
       this.camera.reset();
       if (this.cloud) this._fitView();
       document.getElementById('zoom-slider').value = this.camera.zoom;
       document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-    });
+    }, { signal });
 
     window.addEventListener('keydown', (e) => {
-      if (!this.cloud && !this.gaussianCloud) return;
+      if (!this.cloud) return;
       const panSpeed = 20;
-
-      if (e.key.toLowerCase() === 't') {
-        e.preventDefault();
-        this.toggleFPSMode();
-        return;
-      }
-
-      if (this.gaussianMode) {
-        if (e.key.toLowerCase() === 'r') {
-          e.preventDefault();
-          this.camera.reset();
-          this._fitView();
-          document.getElementById('zoom-slider').value = this.camera.zoom;
-          document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-        }
-        return;
-      }
-
-      if (this.fpsMode) return;
 
       switch(e.key.toLowerCase()) {
         case 'arrowup':
@@ -560,11 +484,10 @@ class App {
           this.camera.markDirty();
           break;
       }
-    });
+    }, { signal });
 
     let lastTouchDist = 0;
     c.addEventListener('touchstart', (e) => {
-      if (this.fpsMode) return;
       if (e.touches.length === 1) {
         if (this.gizmo.mode !== 'none' && this.cloud) {
           const rect = c.getBoundingClientRect();
@@ -586,9 +509,8 @@ class App {
         const dy = e.touches[0].clientY - e.touches[1].clientY;
         lastTouchDist = Math.sqrt(dx*dx + dy*dy);
       }
-    }, { passive: true });
+    }, { passive: true, signal });
     c.addEventListener('touchmove', (e) => {
-      if (this.fpsMode) return;
       const rect = c.getBoundingClientRect();
       const dpr = this.renderer.width / rect.width;
       if (e.touches.length === 1) {
@@ -604,7 +526,7 @@ class App {
           const dy = (e.touches[0].clientY - this._lastMouse[1]) * dpr;
           this._lastMouse = [e.touches[0].clientX, e.touches[0].clientY];
           this.camera.rotateHorizontal(-dx * 0.003);
-          this.camera.rotateVertical(dy * 0.15);
+          this.camera.rotateVertical(-dy * 0.15);
         }
       } else if (e.touches.length === 2) {
         const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -619,26 +541,30 @@ class App {
         }
         lastTouchDist = dist;
       }
-    }, { passive: true });
+    }, { passive: true, signal });
     c.addEventListener('touchend', () => {
       if (this.gizmo.isActive()) this.gizmo.endDrag();
       this._dragging = false;
-    });
+    }, { signal });
 
     c.addEventListener('click', (e) => {
-      if (this.fpsMode) return;
       if (!this.measurement.active || !this.cloud) return;
       const rect = c.getBoundingClientRect();
       const dpr = this.renderer.width / rect.width;
       const sx = (e.clientX - rect.left) * dpr;
       const sy = (e.clientY - rect.top)  * dpr;
       if (this.measurement.onClick(this.cloud, this.camera, this.renderer, sx, sy)) {
+        this.camera.markDirty();
         this._showMeasurement();
       }
-    });
+    }, { signal });
+
+    window.addEventListener('resize', () => this._resize(), { signal });
   }
 
   async loadFile(file) {
+    if (this._loading) { console.warn('Load already in progress'); return; }
+    this._loading = true;
     let loader = null;
     let format = 'unknown';
     let readMethod = null;
@@ -664,13 +590,17 @@ class App {
       return;
     }
 
+    this._abortController.abort();
+    this._abortController = new AbortController();
+    this._bindInput();
+
     if (this.cloud) {
-      this.cloud.dispose();
       this.renderer.dispose();
+      this.cloud.dispose();
       this.cloud = null;
-      this.gaussianCloud = null;
-      this.clearMeasurement();
     }
+    this.minimap.clearCache();
+    this.clearMeasurement();
     this.cloudTransform.reset();
     this.gizmo.setMode('none');
 
@@ -678,11 +608,11 @@ class App {
     loading.classList.add('visible');
     document.getElementById('loading-text').textContent = `Loading ${file.name}…`;
 
+    let buf, data, procResult;
     try {
-      const buf = await readMethod(file);
+      buf = await readMethod(file);
       document.getElementById('loading-text').textContent = `Parsing ${format}…`;
 
-      let data;
       if (format === 'PLY') {
         data = await loader.load(buf);
       } else if (format === 'LAS' || format === 'LAZ') {
@@ -692,11 +622,12 @@ class App {
       } else {
         data = await loader.load(buf);
       }
+      buf = null;
 
       document.getElementById('loading-text').textContent = `Building LOD & index…`;
 
-      const procResult = await new Promise((resolve, reject) => {
-        const blob = new Blob([APP_WORKER_CODE], { type: 'application/javascript' });
+      procResult = await new Promise((resolve, reject) => {
+        const blob = new Blob([APP_OCTREE_WORKER], { type: 'application/javascript' });
         const workerUrl = URL.createObjectURL(blob);
         const worker = new Worker(workerUrl);
         worker.onmessage = (e) => { worker.terminate(); URL.revokeObjectURL(workerUrl); if (e.data.error) reject(new Error(e.data.error)); else resolve(e.data); };
@@ -724,36 +655,24 @@ class App {
         zMax: procResult.zMax,
         intensityMin: procResult.intensityMin,
         intensityMax: procResult.intensityMax,
-        lodLevels: [{ indices: null, count: data.count }, ...procResult.lodLevels],
-        tilePyramid: procResult.tilePyramid,
+        octree: procResult.octree,
         pickGrid: procResult.pickGrid,
+        pickOffsets: procResult.pickOffsets,
+        pickCounts: procResult.pickCounts,
         pickCells: procResult.pickCells,
       });
+      data = null;
+      procResult = null;
 
-      this.gaussianCloud = null;
-      if (this.gaussianMode) {
-        this.gaussianCloud = GaussianCloud.fromPointCloud(this.cloud);
-        this.renderer.uploadGaussianCloud(this.gaussianCloud);
-      } else {
-        this.renderer.uploadPointCloud(this.cloud);
-      }
+      this.renderer.uploadPointCloud(this.cloud);
       this.camera.setRefCenter(this.cloud.center);
       this._fitView();
-      if (this.gaussianMode) {
-        this.renderer.renderSplats(this.camera, this.gaussianCloud, {
-          viewDir: this._getViewDir(),
-          ambient: this.lightAmb,
-        });
-      } else {
-        this.renderer.render(this.camera, this.cloud, {
-          colorMode: this.colorMode,
-          lightDir:  this.getLightDir(),
-          ambient:   this.lightAmb,
-          shading:   this.shading,
-          decimationOptions: this.getDecimationOptions(),
-          cloudTransform: this.cloudTransform,
-        });
-      }
+      this.renderer.render(this.camera, this.cloud, {
+        colorMode: this.colorMode,
+        lightDir:  this.getLightDir(),
+        ambient:   this.lightAmb,
+        shading:   this.shading,
+      });
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
       document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
@@ -764,13 +683,14 @@ class App {
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
         (this.cloud.hasIntensity ? 'Intensity ✓' : '');
 
-      setTimeout(() => this.renderer.generateDepthAtlas(
-        this.cloud, this.camera.eightDir ? 8 : 4
-      ), 100);
     } catch (err) {
       console.error(err);
       alert(`Failed to load ${format} file: ${err.message}`);
     } finally {
+      data = null;
+      procResult = null;
+      buf = null;
+      this._loading = false;
       loading.classList.remove('visible');
     }
   }
@@ -802,61 +722,37 @@ class App {
     const dt = (now - this._lastTime) / 1000;
     this._lastTime = now;
 
-    if (this.fpsMode) {
-      this.fpsCamera.update(dt);
-    } else {
-      this.camera.update(dt);
-    }
+    this.camera.update(dt);
 
     let needsRender = false;
-    const hasGeo = this.gaussianMode ? !!this.gaussianCloud : !!this.cloud;
+    const hasGeo = !!this.cloud;
     if (hasGeo) {
-      if (this.fpsMode) {
-        needsRender = this.fpsCamera.consumeDirty() || this.measurement.active;
-      } else {
-        needsRender = this.camera.consumeDirty() || this.cloudTransform.consumeDirty() || this.measurement.active;
-      }
+      needsRender = this.camera.consumeDirty() || this.cloudTransform.consumeDirty();
     }
     if (this.gizmo.mode !== 'none') needsRender = true;
     let lodCount = this.renderer._lastDrawCount;
 
     if (needsRender) {
-      if (this.gaussianMode && this.gaussianCloud) {
-        // Dynamic density based on zoom - higher zoom = higher density
-        const zoomDensity = Math.min(1.0, Math.max(0.3, this.camera.zoom * 0.1));
-        const densityFactor = zoomDensity * this.gaussianDensity;
-        lodCount = this.renderer.renderSplats(this.camera, this.gaussianCloud, {
-          viewDir: this._getViewDir(),
-          ambient: this.lightAmb,
-          densityFactor: densityFactor,
-        });
-      } else if (!this.gaussianMode) {
-        lodCount = this.renderer.render(this.camera, this.cloud, {
-          colorMode: this.colorMode,
-          lightDir:  this.getLightDir(),
-          ambient:   this.lightAmb,
-          shading:   this.shading,
-          decimationOptions: this.getDecimationOptions(),
-          fpsMode:   this.fpsMode,
-          fpsCamera: this.fpsMode ? this.fpsCamera : null,
-          cloudTransform: this.cloudTransform,
-        });
-      }
+      lodCount = this.renderer.render(this.camera, this.cloud, {
+        colorMode: this.colorMode,
+        lightDir:  this.getLightDir(),
+        ambient:   this.lightAmb,
+        shading:   this.shading,
+      });
 
-      if (!this.fpsMode && !this.gaussianMode && (this._minimapFrame++ & 3) === 0) {
+      if ((this._minimapFrame++ & 3) === 0) {
         this.minimap.draw(this.cloud, this.camera, this.renderer.width, this.renderer.height);
       }
 
-      if (!this.gaussianMode) {
-        this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
-        this._drawGizmo(this.overlayCtx);
-        if (this.gizmo.mode !== 'none' && this.cloud && !this.fpsMode) {
-          this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
-        }
-        if (this.measurement.points.length) {
-          this.measurement.drawOverlay(this.overlayCtx, this.cloud, this.camera, this.renderer);
-        }
-        if (this.gizmo.mode !== 'none') {
+      this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+      this._drawGizmo(this.overlayCtx);
+      if (this.gizmo.mode !== 'none' && this.cloud) {
+        this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
+      }
+      if (this.measurement.points.length) {
+        this.measurement.drawOverlay(this.overlayCtx, this.cloud, this.camera, this.renderer);
+      }
+      if (this.gizmo.mode !== 'none') {
           const ctx = this.overlayCtx;
           ctx.save();
           ctx.fillStyle = 'rgba(13,17,23,0.85)';
@@ -868,7 +764,6 @@ class App {
           ctx.fillText('Gizmo: ' + this.gizmo.getModeLabel(), 20, 30);
           ctx.restore();
         }
-      }
     }
 
     this._frames++;
@@ -878,28 +773,15 @@ class App {
       this._lastFpsTime = now;
       this.ui.updateStats(this._fps, lodCount, this.cloud ? this.cloud.count : 0);
 
-      if (this.fpsMode && this.cloud) {
-        const pos = this.fpsCamera.position;
-        const pitch = (this.fpsCamera.pitch * 180 / Math.PI).toFixed(0);
-        const yaw = (this.fpsCamera.yaw * 180 / Math.PI).toFixed(0);
-        this._hudEl.innerHTML =
-          `<b>FPS Explorer</b><br/>` +
-          `Pos: <b>[${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}]</b><br/>` +
-          `Dir: Pitch <b>${pitch}°</b> Yaw <b>${yaw}°</b><br/>` +
-          `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b>`;
-      } else if (hasGeo) {
+      if (hasGeo) {
         const views = ['N','E','S','W','NE','SE','SW','NW'];
         const vi = this.camera.viewIndex;
-        const modeLabel = this.gaussianMode ? 'Gaussian' : this.colorMode;
         const bench = this.renderer.getBench();
-        const benchLine = this.gaussianMode
-          ? `Sort: <b>${bench.sortMs.toFixed(1)}</b>ms  Cull: <b>${bench.cullMs.toFixed(1)}</b>ms`
-          : `LOD: <b>${bench.pointMs.toFixed(1)}</b>ms`;
         this._hudEl.innerHTML =
           `<b>Nuvola</b> 2.5D Viewer<br/>` +
           `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b><br/>` +
-          `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${modeLabel}</b><br/>` +
-          `<span style="font-size:0.65rem;color:#8b949e">${benchLine}</span>`;
+          `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
+          `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
       }
     }
 
@@ -908,8 +790,13 @@ class App {
 
   dispose() {
     this._disposed = true;
-    if (this.cloud) this.cloud.dispose();
+    this._abortController.abort();
     this.renderer.dispose();
+    if (this.cloud) {
+      this.cloud.dispose();
+      this.cloud = null;
+    }
+    this.minimap.clearCache();
     this.plyLoader.dispose();
     this.lasLoader.dispose();
     this.xyzLoader.dispose();
