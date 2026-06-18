@@ -79,11 +79,25 @@ export async function decompressLAZ(lazBuffer) {
     : _throwNoDecoder();
 
   const size = lazBuffer.byteLength;
+  // La memoria WASM ha un limite di 64MB. Con ratio compressione ~3-5x,
+  // file LAZ > ~12MB potrebbero superare il limite di decompressione.
+  if (size > 12 * 1024 * 1024) {
+    throw new Error(
+      `File LAZ troppo grande per decompressione in-browser (${(size / 1024 / 1024).toFixed(1)}MB). ` +
+      `Limite: ~12MB compressi. Usare laszip offline: laszip -i file.laz -o file.las`
+    );
+  }
+
   const inputPtr = wasm.exports.malloc(size);
+  if (!inputPtr) throw new Error('WASM memory allocation failed for input buffer');
   const inputBuf = new Uint8Array(wasm.exports.memory.buffer, inputPtr, size);
   inputBuf.set(new Uint8Array(lazBuffer));
 
   const outputSizePtr = wasm.exports.malloc(4);
+  if (!outputSizePtr) {
+    wasm.exports.free(inputPtr);
+    throw new Error('WASM memory allocation failed for output size pointer');
+  }
   const outputPtr = wasm.exports.laszip_decode(inputPtr, size, outputSizePtr);
 
   if (!outputPtr) {

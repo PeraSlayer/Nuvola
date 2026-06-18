@@ -610,6 +610,10 @@ class App {
 
     let buf, data, procResult;
     try {
+      if (file.size > 500 * 1024 * 1024) {
+        throw new Error(`File troppo grande (${(file.size / 1024 / 1024).toFixed(1)}MB). Limite: 500MB.`);
+      }
+
       buf = await readMethod(file);
       document.getElementById('loading-text').textContent = `Parsing ${format}…`;
 
@@ -624,14 +628,36 @@ class App {
       }
       buf = null;
 
+      if (!data || !data.count || data.count === 0) {
+        throw new Error('Nessun punto valido trovato nel file.');
+      }
+
       document.getElementById('loading-text').textContent = `Building LOD & index…`;
 
       procResult = await new Promise((resolve, reject) => {
         const blob = new Blob([APP_OCTREE_WORKER], { type: 'application/javascript' });
         const workerUrl = URL.createObjectURL(blob);
         const worker = new Worker(workerUrl);
-        worker.onmessage = (e) => { worker.terminate(); URL.revokeObjectURL(workerUrl); if (e.data.error) reject(new Error(e.data.error)); else resolve(e.data); };
-        worker.onerror = (e) => { worker.terminate(); URL.revokeObjectURL(workerUrl); reject(new Error(e.message || 'Worker error')); };
+
+        const timeout = setTimeout(() => {
+          worker.terminate();
+          URL.revokeObjectURL(workerUrl);
+          reject(new Error('Worker timeout: LOD building took too long'));
+        }, 60000);
+
+        worker.onmessage = (e) => {
+          clearTimeout(timeout);
+          worker.terminate();
+          URL.revokeObjectURL(workerUrl);
+          if (e.data.error) reject(new Error(e.data.error));
+          else resolve(e.data);
+        };
+        worker.onerror = (e) => {
+          clearTimeout(timeout);
+          worker.terminate();
+          URL.revokeObjectURL(workerUrl);
+          reject(new Error(e.message || 'Worker error'));
+        };
         const t = [data.positions.buffer, data.colors.buffer];
         if (data.intensity) t.push(data.intensity.buffer);
         worker.postMessage({
@@ -641,6 +667,15 @@ class App {
           count: data.count,
         }, t);
       });
+
+      if (procResult.positions) {
+        const p = procResult.positions;
+        for (let i = 0; i < Math.min(100, procResult.count); i++) {
+          if (!isFinite(p[i*3]) || !isFinite(p[i*3+1]) || !isFinite(p[i*3+2])) {
+            throw new Error('Il file contiene coordinate non valide (NaN/Infinity).');
+          }
+        }
+      }
 
       this.cloud = new PointCloud({
         count: data.count,
@@ -719,70 +754,76 @@ class App {
   _loop(now) {
     if (this._disposed) return;
 
-    const dt = (now - this._lastTime) / 1000;
-    this._lastTime = now;
+    try {
+      const dt = (now - this._lastTime) / 1000;
+      this._lastTime = now;
 
-    this.camera.update(dt);
+      this.camera.update(dt);
 
-    let needsRender = false;
-    const hasGeo = !!this.cloud;
-    if (hasGeo) {
-      needsRender = this.camera.consumeDirty() || this.cloudTransform.consumeDirty();
-    }
-    if (this.gizmo.mode !== 'none') needsRender = true;
-    let lodCount = this.renderer._lastDrawCount;
-
-    if (needsRender) {
-      lodCount = this.renderer.render(this.camera, this.cloud, {
-        colorMode: this.colorMode,
-        lightDir:  this.getLightDir(),
-        ambient:   this.lightAmb,
-        shading:   this.shading,
-      });
-
-      if ((this._minimapFrame++ & 3) === 0) {
-        this.minimap.draw(this.cloud, this.camera, this.renderer.width, this.renderer.height);
-      }
-
-      this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
-      this._drawGizmo(this.overlayCtx);
-      if (this.gizmo.mode !== 'none' && this.cloud) {
-        this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
-      }
-      if (this.measurement.points.length) {
-        this.measurement.drawOverlay(this.overlayCtx, this.cloud, this.camera, this.renderer);
-      }
-      if (this.gizmo.mode !== 'none') {
-          const ctx = this.overlayCtx;
-          ctx.save();
-          ctx.fillStyle = 'rgba(13,17,23,0.85)';
-          ctx.fillRect(12, 12, 120, 32);
-          ctx.fillStyle = '#e6edf3';
-          ctx.font = '13px monospace';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'middle';
-          ctx.fillText('Gizmo: ' + this.gizmo.getModeLabel(), 20, 30);
-          ctx.restore();
-        }
-    }
-
-    this._frames++;
-    if (now - this._lastFpsTime >= 1000) {
-      this._fps = this._frames * 1000 / (now - this._lastFpsTime);
-      this._frames = 0;
-      this._lastFpsTime = now;
-      this.ui.updateStats(this._fps, lodCount, this.cloud ? this.cloud.count : 0);
-
+      let needsRender = false;
+      const hasGeo = !!this.cloud;
       if (hasGeo) {
-        const views = ['N','E','S','W','NE','SE','SW','NW'];
-        const vi = this.camera.viewIndex;
-        const bench = this.renderer.getBench();
-        this._hudEl.innerHTML =
-          `<b>Nuvola</b> 2.5D Viewer<br/>` +
-          `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b><br/>` +
-          `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
-          `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
+        const cameraDirty = this.camera.consumeDirty();
+        const transformDirty = this.cloudTransform.consumeDirty();
+        needsRender = cameraDirty || transformDirty;
       }
+      if (this.gizmo.mode !== 'none') needsRender = true;
+      let lodCount = this.renderer._lastDrawCount;
+
+      if (needsRender) {
+        lodCount = this.renderer.render(this.camera, this.cloud, {
+          colorMode: this.colorMode,
+          lightDir:  this.getLightDir(),
+          ambient:   this.lightAmb,
+          shading:   this.shading,
+        });
+
+        if ((this._minimapFrame++ & 3) === 0) {
+          this.minimap.draw(this.cloud, this.camera, this.renderer.width, this.renderer.height);
+        }
+
+        this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+        this._drawGizmo(this.overlayCtx);
+        if (this.gizmo.mode !== 'none' && this.cloud) {
+          this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
+        }
+        if (this.measurement.points.length) {
+          this.measurement.drawOverlay(this.overlayCtx, this.cloud, this.camera, this.renderer);
+        }
+        if (this.gizmo.mode !== 'none') {
+            const ctx = this.overlayCtx;
+            ctx.save();
+            ctx.fillStyle = 'rgba(13,17,23,0.85)';
+            ctx.fillRect(12, 12, 120, 32);
+            ctx.fillStyle = '#e6edf3';
+            ctx.font = '13px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Gizmo: ' + this.gizmo.getModeLabel(), 20, 30);
+            ctx.restore();
+          }
+      }
+
+      this._frames++;
+      if (now - this._lastFpsTime >= 1000) {
+        this._fps = this._frames * 1000 / (now - this._lastFpsTime);
+        this._frames = 0;
+        this._lastFpsTime = now;
+        this.ui.updateStats(this._fps, lodCount, this.cloud ? this.cloud.count : 0);
+
+        if (hasGeo) {
+          const views = ['N','E','S','W','NE','SE','SW','NW'];
+          const vi = this.camera.viewIndex;
+          const bench = this.renderer.getBench();
+          this._hudEl.innerHTML =
+            `<b>Nuvola</b> 2.5D Viewer<br/>` +
+            `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b><br/>` +
+            `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
+            `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
+        }
+      }
+    } catch (err) {
+      console.error('[_loop] Render loop error:', err);
     }
 
     requestAnimationFrame((t) => this._loop(t));

@@ -53,29 +53,41 @@ export class Camera {
     this._cloudCenter = [0, 0, 0];
     this._depthMin = 0;
     this._depthMax = 1;
+
+    // Pre-allocated arrays for getUniforms (reused each frame, avoids allocation)
+    this._uRes = new Float32Array(2);
+    this._uPan = new Float32Array(2);
+    this._uCenter = new Float32Array(3);
   }
 
   get viewOffsetRad() {
     return this.viewOffsetDeg * Math.PI / 180;
   }
 
+  get rotAngle() { return this._rotAngle; }
+  get defaultZoom() { return this._defaultZoom; }
+  get refCenter() { return this._refCenter; }
+
   getUniforms(w, h, cloud) {
     const center = cloud ? cloud.center : this._cloudCenter;
     const zMin = cloud ? cloud.zMin - center[2] : 0;
     const zMax = cloud ? cloud.zMax - center[2] : 1;
-    const hasIntensity = cloud && cloud.hasIntensity && cloud.intensity;
+    const hasIntensity = cloud && cloud.hasIntensity;
     const iMin = hasIntensity ? cloud.intensityMin : 0;
     const iMax = hasIntensity ? cloud.intensityMax : 1;
     const dr = _depthRange(cloud, this._rotAngle);
+    this._uRes[0] = w; this._uRes[1] = h;
+    this._uPan[0] = this.panX; this._uPan[1] = this.panY;
+    this._uCenter[0] = center[0]; this._uCenter[1] = center[1]; this._uCenter[2] = center[2];
     return {
-      u_resolution: [w, h],
-      u_pan: [this.panX, this.panY],
+      u_resolution: this._uRes,
+      u_pan: this._uPan,
       u_zoom: this.zoom,
       u_rot: this._rotAngle,
       u_rotX: this.rotationXDeg * Math.PI / 180,
       u_rotY: this.rotationYDeg * Math.PI / 180,
       u_rotZ: this.rotationZDeg * Math.PI / 180,
-      u_center: center,
+      u_center: this._uCenter,
       u_zMin: zMin,
       u_zMax: zMax,
       u_depthMin: dr.min,

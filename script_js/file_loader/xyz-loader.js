@@ -29,108 +29,130 @@ API asincrona usata dall'app principale.
 const XYZ_WORKER_SOURCE = `
 'use strict';
 
-function parseXYZ(text) {
-  const lines = text.split(/\\r?\\n/);
-  const points = [];
-  const colorsList = [];
-  const intensityList = [];
-  
-  // Auto‑detect format from first data line
-  let colorPresent = false;
-  let intensityPresent = false;
-  let firstDataLine = null;
-  
-  // Find first non‑comment line
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
-    const parts = line.split(/[\\s,]+/).filter(p => p.length > 0);
-    if (parts.length >= 3) {
-      firstDataLine = parts;
-      if (parts.length >= 6) colorPresent = true;
-      if (parts.length >= 4 && !colorPresent) {
-        const val = parseFloat(parts[3]);
-        if (!isNaN(val) && val <= 255) intensityPresent = true;
-      }
+function countDataLines(buf) {
+  var b = new Uint8Array(buf), n = b.length, c = 0, i = 0;
+  while (i < n) {
+    var s = i;
+    while (i < n && b[i] !== 10 && b[i] !== 13) i++;
+    var e = i;
+    if (i < n && b[i] === 13) i++;
+    if (i < n && b[i] === 10) i++;
+    if (e === s) continue;
+    var f = b[s];
+    if (f === 35) continue;
+    if (f === 47 && s + 1 < e && b[s + 1] === 47) continue;
+    c++;
+  }
+  return c;
+}
+
+function parseXYZ(buf, count) {
+  var decoder = new TextDecoder('utf-8');
+  var b = new Uint8Array(buf), n = b.length;
+  var pos = 0, idx = 0;
+
+  // Detect format on first data line
+  var colorPresent = false, intensityPresent = true;
+  while (pos < n) {
+    var s = pos;
+    while (pos < n && b[pos] !== 10 && b[pos] !== 13) pos++;
+    var e = pos;
+    if (pos < n && b[pos] === 13) pos++;
+    if (pos < n && b[pos] === 10) pos++;
+    if (e === s) continue;
+    var f = b[s];
+    if (f === 35 || (f === 47 && s + 1 < e && b[s + 1] === 47)) continue;
+    var line = decoder.decode(b.subarray(s, e)).trim();
+    var p = line.split(/[\\s,]+/);
+    if (p.length >= 3) {
+      if (p.length >= 6) colorPresent = true;
       break;
     }
   }
-  
-  if (!firstDataLine) throw new Error('No valid data found');
-  
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
-    
-    const parts = line.split(/[\\s,]+/).filter(p => p.length > 0);
-    if (parts.length < 3) continue;
-    
-    const x = parseFloat(parts[0]);
-    const y = parseFloat(parts[1]);
-    const z = parseFloat(parts[2]);
+
+  // Pre-allocate typed arrays directly (no JS arrays)
+  var positions = new Float32Array(count * 3);
+  var colors = new Uint8Array(count * 3);
+  var intensity = new Float32Array(count);
+  var hasColor = colorPresent || true;
+
+  // Second pass: parse lines into typed arrays
+  pos = 0;
+  while (pos < n && idx < count) {
+    var s = pos;
+    while (pos < n && b[pos] !== 10 && b[pos] !== 13) pos++;
+    var e = pos;
+    if (pos < n && b[pos] === 13) pos++;
+    if (pos < n && b[pos] === 10) pos++;
+    if (e === s) continue;
+    var f = b[s];
+    if (f === 35 || (f === 47 && s + 1 < e && b[s + 1] === 47)) continue;
+    var line = decoder.decode(b.subarray(s, e)).trim();
+    var p = line.split(/[\\s,]+/);
+    if (p.length < 3) continue;
+
+    var x = parseFloat(p[0]), y = parseFloat(p[1]), z = parseFloat(p[2]);
     if (isNaN(x) || isNaN(y) || isNaN(z)) continue;
-    
-    points.push(x, y, z);
-    
-    // Colors
-    if (colorPresent && parts.length >= 6) {
-      let r = parseFloat(parts[3]);
-      let g = parseFloat(parts[4]);
-      let b = parseFloat(parts[5]);
-      if (isNaN(r) || isNaN(g) || isNaN(b)) { r = g = b = 128; }
-      if (r <= 1 && g <= 1 && b <= 1) { r *= 255; g *= 255; b *= 255; }
-      colorsList.push(Math.min(255, Math.max(0, r)),
-                      Math.min(255, Math.max(0, g)),
-                      Math.min(255, Math.max(0, b)));
-    } else if (!colorPresent && intensityPresent && parts.length >= 4) {
-      // Grayscale based on intensity
-      const inten = parseFloat(parts[3]);
-      const val = isNaN(inten) ? 128 : Math.min(255, Math.max(0, inten));
-      colorsList.push(val, val, val);
+
+    var i3 = idx * 3;
+    positions[i3] = x; positions[i3 + 1] = y; positions[i3 + 2] = z;
+
+    if (colorPresent && p.length >= 6) {
+      var r = parseFloat(p[3]), g = parseFloat(p[4]), bv = parseFloat(p[5]);
+      if (isNaN(r) || isNaN(g) || isNaN(bv)) { r = g = bv = 128; }
+      if (r <= 1 && g <= 1 && bv <= 1) { r *= 255; g *= 255; bv *= 255; }
+      colors[i3] = Math.min(255, Math.max(0, r));
+      colors[i3 + 1] = Math.min(255, Math.max(0, g));
+      colors[i3 + 2] = Math.min(255, Math.max(0, bv));
+    } else if (p.length >= 4) {
+      var iv = parseFloat(p[3]);
+      var cv = isNaN(iv) ? 128 : Math.min(255, Math.max(0, iv));
+      colors[i3] = colors[i3 + 1] = colors[i3 + 2] = cv;
     } else {
-      colorsList.push(180, 180, 200);
+      colors[i3] = 180; colors[i3 + 1] = 180; colors[i3 + 2] = 200;
     }
-    
-    // Intensity
-    if (intensityPresent && parts.length >= 4) {
-      let inten = parseFloat(parts[3]);
-      if (isNaN(inten)) inten = 0.5;
-      intensityList.push(inten);
+
+    if (p.length >= 4) {
+      var inten = parseFloat(p[3]);
+      intensity[idx] = isNaN(inten) ? 0.5 : inten;
     } else {
-      intensityList.push(0.5);
+      intensity[idx] = 0.5;
     }
+
+    idx++;
   }
-  
-  const pointCount = points.length / 3;
-  
+
   // Normalize intensity
-  let iMin = Infinity, iMax = -Infinity;
-  for (let i = 0; i < pointCount; i++) {
-    const v = intensityList[i];
+  var iMin = Infinity, iMax = -Infinity;
+  for (var i = 0; i < idx; i++) {
+    var v = intensity[i];
     if (v < iMin) iMin = v;
     if (v > iMax) iMax = v;
   }
-  const iRange = iMax - iMin;
-  for (let i = 0; i < pointCount; i++) {
-    if (iRange > 0) intensityList[i] = (intensityList[i] - iMin) / iRange;
-    else intensityList[i] = 0.5;
+  var iRange = iMax - iMin;
+  if (iRange > 0) {
+    for (var i = 0; i < idx; i++) intensity[i] = (intensity[i] - iMin) / iRange;
+  } else {
+    for (var i = 0; i < idx; i++) intensity[i] = 0.5;
   }
-  
+
   return {
-    positions: new Float32Array(points),
-    colors: new Uint8Array(colorsList),
-    intensity: new Float32Array(intensityList),
-    count: pointCount,
-    hasColor: colorPresent || !intensityPresent, // if no intensity, we made gray
+    positions: positions,
+    colors: colors,
+    intensity: intensity,
+    count: idx,
+    hasColor: hasColor,
     hasIntensity: true
   };
 }
 
 self.onmessage = function(e) {
   try {
-    const text = e.data;
-    const result = parseXYZ(text);
-    self.postMessage({ ok: true, ...result }, 
+    var buf = e.data;
+    var count = countDataLines(buf);
+    if (count === 0) throw new Error('No valid data found');
+    var result = parseXYZ(buf, count);
+    self.postMessage({ ok: true, positions: result.positions, colors: result.colors, intensity: result.intensity, count: result.count, hasColor: result.hasColor, hasIntensity: result.hasIntensity }, 
       [result.positions.buffer, result.colors.buffer, result.intensity.buffer]);
   } catch(err) {
     self.postMessage({ ok: false, error: err.message });
@@ -158,10 +180,10 @@ export class XYZLoader {
   }
   
   static async readFile(file) {
-    return await file.text();
+    return await file.arrayBuffer();
   }
   
-  load(text) {
+  load(buf) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(this._workerUrl);
       worker.onmessage = (e) => {
@@ -170,7 +192,7 @@ export class XYZLoader {
         else reject(new Error(e.data.error));
       };
       worker.onerror = (err) => { worker.terminate(); reject(err); };
-      worker.postMessage(text);
+      worker.postMessage(buf, [buf]);
     });
   }
 }

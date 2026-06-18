@@ -67,16 +67,23 @@ export class MiniMap {
     ctx.arc(cx, cy, 4, 0, Math.PI*2);
     ctx.stroke();
 
-    const angle = camera._rotAngle - camera.viewOffsetRad;
+    const angle = camera.rotAngle - camera.viewOffsetRad;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + Math.sin(angle) * 12, cy - Math.cos(angle) * 12);
     ctx.stroke();
   }
 
+  clearCache() {
+    this.isCached = false;
+    const ctx = this.bgCtx;
+    ctx.clearRect(0, 0, this.bgCanvas.width, this.bgCanvas.height);
+  }
+
   // NUOVO: Metodo isolato per disegnare i punti una volta sola
   _cachePointCloud(cloud, w, h) {
     const ctx = this.bgCtx;
+    ctx.clearRect(0, 0, w, h);
     const b = cloud.bounds;
     const spanX = b.max[0] - b.min[0] || 1;
     const spanY = b.max[1] - b.min[1] || 1;

@@ -85,6 +85,10 @@ export class UIController {
     $('chk-8dir').onchange = (e) => {
       a.camera.eightDir = e.target.checked;
       a.camera.setView(a.camera.viewIndex);
+      a._updateViewButtons();
+      if (a.cloud) a._fitView();
+    };
+
     document.querySelectorAll('.snap-btn').forEach(btn => {
       btn.onclick = () => {
         a.snapToView(btn.dataset.view);
@@ -97,9 +101,6 @@ export class UIController {
       };
     });
 
-    a._updateViewButtons();
-      if (a.cloud) a._fitView();
-    };
     $('chk-smooth-rot').onchange = (e) => { a.camera.smoothRot = e.target.checked; };
 
     $('btn-reset').onclick = () => {

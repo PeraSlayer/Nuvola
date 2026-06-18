@@ -234,6 +234,7 @@ export class Renderer {
   }
 
   _ensureResources() {
+    this._contextLost = false;
     if (this.progPoint && this.progLight) return;
     this._initShaders();
     this._initBuffers();
@@ -406,7 +407,6 @@ export class Renderer {
     const drawCount = drawCall.count;
     const hasIndices = !!drawCall.indices;
     const modeVal = COLOR_MODE_VALUE[colorMode] != null ? COLOR_MODE_VALUE[colorMode] : 0;
-
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.viewport(0, 0, this.width, this.height);
 
@@ -440,7 +440,7 @@ export class Renderer {
 
     gl.colorMask(true, true, true, true);
     gl.depthMask(false);
-    gl.depthFunc(gl.EQUAL);
+    gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
 
     if (hasIndices) {
