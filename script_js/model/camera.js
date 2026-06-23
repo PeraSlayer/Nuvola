@@ -255,6 +255,4 @@ export class Camera {
     this.viewIndex = 0;
     this.markDirty();
   }
-
-  update() {}
 }

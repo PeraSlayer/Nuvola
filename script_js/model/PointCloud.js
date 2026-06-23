@@ -1,4 +1,6 @@
 import { collectVisibleLeaves, flattenTree, extractCamParams } from './Octree.js';
+import { VisibilitySystem } from '../potree/VisibilitySystem.js';
+import { LRUCache } from '../potree/LRUCache.js';
 
 const MAX_BUDGET = 2000000;
 const MIN_BUDGET = 1000000;
@@ -39,6 +41,9 @@ export class PointCloud {
     }
 
     this.octree = data.octree || null;
+    this.octreeGeometry = data.octreeGeometry || null;
+    this.visibilitySystem = new VisibilitySystem();
+    this.lru = new LRUCache();
 
     if (data.pickGrid) {
       this._pickGrid = data.pickGrid;
@@ -49,13 +54,19 @@ export class PointCloud {
 
     this._collectBuf = new Uint32Array(MAX_BUDGET);
     this._leafRefs = [];
+    this.renderer = null;
+    this._needsRender = false;
   }
 
   dispose() {
+    if (this.lru) this.lru.disposeAll();
     this.positions = null;
     this.colors = null;
     this.intensity = null;
     this.octree = null;
+    this.octreeGeometry = null;
+    this.visibilitySystem = null;
+    this.lru = null;
     this._collectBuf = null;
     this._leafRefs = null;
     this._pickGrid = null;
@@ -64,9 +75,18 @@ export class PointCloud {
     this._pickCells = 0;
     this.bounds = null;
     this.center = null;
+    this.renderer = null;
+  }
+
+  set pointBudget(val) {
+    this.visibilitySystem.pointBudget = val;
+    if (this.lru) this.lru.maxNumPoints = val * 2;
   }
 
   getDrawCall(camera, viewportW, viewportH) {
+    if (this.octreeGeometry && this.octreeGeometry.root) {
+      return this._getDrawCallPotree(camera, viewportW, viewportH);
+    }
     if (!this.octree) return { indices: null, count: this.count };
 
     const total = this.count;
@@ -107,6 +127,47 @@ export class PointCloud {
       }
     }
     return { indices: buf.subarray(0, outIdx), count: outIdx };
+  }
+
+  _getDrawCallPotree(camera, viewportW, viewportH) {
+    const budget = Math.min(this.visibilitySystem.pointBudget, MAX_BUDGET);
+    const result = this.visibilitySystem.selectNodes(
+      camera, this.octreeGeometry, viewportW, viewportH, budget
+    );
+
+    this._scheduleNodeLoads(result.unloadedNodes);
+
+    const loadedNodes = result.visibleNodes.filter(n => n.gpuVAO && n.loaded);
+    let total = 0;
+    for (let i = 0; i < loadedNodes.length; i++) total += loadedNodes[i].numPoints;
+
+    return { nodes: loadedNodes, count: total, indices: null };
+  }
+
+  _scheduleNodeLoads(unloadedNodes) {
+    if (!this.renderer || !unloadedNodes || unloadedNodes.length === 0) return;
+    const remaining = this.visibilitySystem.maxNodesLoadingPerFrame - this.visibilitySystem._numNodesLoading;
+    if (remaining <= 0) return;
+
+    const toLoad = Math.min(remaining, unloadedNodes.length);
+    for (let i = 0; i < toLoad; i++) {
+      const node = unloadedNodes[i];
+      if (node.loaded || node.loading) continue;
+
+      node.onLoad((n) => {
+        if (this.renderer) this.renderer.uploadNode(n);
+        if (this.lru) this.lru.touch(n);
+        this._needsRender = true;
+      });
+
+      this.visibilitySystem._numNodesLoading++;
+      node.load().then(() => {
+        this.visibilitySystem._numNodesLoading--;
+      }).catch((error) => {
+        this.visibilitySystem._numNodesLoading--;
+        console.warn(`PointCloud: failed to load node ${node.name}:`, error.message);
+      });
+    }
   }
 
   _computeBounds() {

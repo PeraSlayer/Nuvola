@@ -25,13 +25,17 @@ import { decompressLAZ }   from '../file_loader/laz-decompressor.js';
 import { XYZLoader }       from '../file_loader/xyz-loader.js';
 import { RXPLoader }       from '../file_loader/rxp-loader.js';
 import { PointCloud }      from '../model/PointCloud.js';
-import { Camera }          from '../model/camera.js';
+import { CameraController } from '../potree/CameraController.js';
 import { CloudTransform }  from '../model/transform.js';
 import { Gizmo }           from '../view/gizmo.js';
 import { Renderer }        from '../rendering-app/renderer.js';
 import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
 import { UIController }    from '../view/ui-controller.js';
+import { FPSControls }     from '../view/fps-controls.js';
+import * as THREE from 'three';
+import { PotreeLoader }    from '../potree/PotreeLoader.js';
+import { bindInput }        from './input.js';
 
 
 /**
@@ -65,7 +69,7 @@ function _octBuild(positions, indices, bounds, depth, maxDepth, leafSize) {
     var ci = ((px<mx?0:1)<<2)|((py<my?0:1)<<1)|(pz<mz?0:1);
     if (ci===0){c0.push(idx)}else if(ci===1){c1.push(idx)}else if(ci===2){c2.push(idx)}else if(ci===3){c3.push(idx)}else if(ci===4){c4.push(idx)}else if(ci===5){c5.push(idx)}else if(ci===6){c6.push(idx)}else{c7.push(idx)};
   }
-  var cb=[[bounds[0],bounds[1],bounds[2],mx,my,mz],[mx,bounds[1],bounds[2],bounds[3],my,mz],[bounds[0],my,bounds[2],mx,bounds[4],mz],[mx,my,bounds[2],bounds[3],bounds[4],mz],[bounds[0],bounds[1],mz,mx,my,bounds[5]],[mx,bounds[1],mz,bounds[3],my,bounds[5]],[bounds[0],my,mz,mx,bounds[4],bounds[5]],[mx,my,mz,bounds[3],bounds[4],bounds[5]]];
+  var cb=[[bounds[0],bounds[1],bounds[2],mx,my,mz],[bounds[0],bounds[1],mz,mx,my,bounds[5]],[bounds[0],my,bounds[2],mx,bounds[4],mz],[bounds[0],my,mz,mx,bounds[4],bounds[5]],[mx,bounds[1],bounds[2],bounds[3],my,mz],[mx,bounds[1],mz,bounds[3],my,bounds[5]],[mx,my,bounds[2],bounds[3],bounds[4],mz],[mx,my,mz,bounds[3],bounds[4],bounds[5]]];
   var ch = [];
   var lists = [c0,c1,c2,c3,c4,c5,c6,c7];
   for (var k = 0; k < 8; k++) { if (lists[k].length > 0) ch.push(_octBuild(positions, new Uint32Array(lists[k]), cb[k], depth+1, maxDepth, leafSize)); }
@@ -139,7 +143,8 @@ class App {
     this.rxpLoader = new RXPLoader();
 
     this.renderer    = new Renderer(this.canvas);
-    this.camera      = new Camera();
+    this.camera      = new CameraController();
+    this.fpsControls = new FPSControls(this.canvas, this.camera.fpsCamera);
     this.measurement = new MeasurementTool();
     this.minimap     = new MiniMap(document.getElementById('minimap-canvas'));
     this.ui          = new UIController(this);
@@ -156,6 +161,9 @@ class App {
     this.enableRangeDecimation = true;
     this.minPointsForDetail = 50000;
     this.maxDistanceRatio = 1.0;
+    this._pointBudget = 1000000;
+    this.pointSize = 3.0;
+    this.pointSizeType = 1;
 
     this._fps = 0;
     this._frames = 0;
@@ -163,6 +171,7 @@ class App {
     this._lastTime    = performance.now();
 
     this._dragging  = false;
+    this._dragButton = -1;
     this._lastMouse = [0, 0];
     this._minimapFrame = 0;
     this._hudEl = document.getElementById('hud');
@@ -170,9 +179,10 @@ class App {
     this._disposed = false;
     this._loading = false;
     this._activeWorker = null;
+    this._potreeLoader = null;
     this._abortController = new AbortController();
 
-    this._bindInput();
+    bindInput(this);
     this._resize();
     requestAnimationFrame((t) => this._loop(t));
   }
@@ -200,6 +210,17 @@ class App {
     const cz = 1;
     const len = Math.sqrt(cx * cx + cy * cy + cz * cz);
     return [cx / len, cy / len, cz / len];
+  }
+
+  get pointBudget() {
+    return this._pointBudget;
+  }
+
+  set pointBudget(val) {
+    this._pointBudget = val;
+    if (this.cloud) {
+      this.cloud.pointBudget = val;
+    }
   }
 
   getDecimationOptions() {
@@ -341,226 +362,80 @@ class App {
     });
   }
 
-  _bindInput() {
-    const c = this.canvas;
-    const signal = this._abortController.signal;
+  async loadPotreeDataset(url) {
+    if (this._loading) { console.warn('Load already in progress'); return; }
+    this._loading = true;
 
-    c.addEventListener('mousedown', (e) => {
-      if (this.measurement.active && e.button === 0) return;
-      if (this.gizmo.mode !== 'none' && this.cloud && e.button === 0) {
-        const rect = c.getBoundingClientRect();
-        const dpr = this.renderer.width / rect.width;
-        const sx = (e.clientX - rect.left) * dpr;
-        const sy = (e.clientY - rect.top) * dpr;
-        const hit = this.gizmo.hitTest(sx, sy, this.camera, this.cloud);
-        if (hit) {
-          this.gizmo.startDrag(hit, sx, sy);
-          this.camera.markDirty();
-          return;
-        }
-      }
-      this._dragging = true;
-      this._lastMouse = [e.clientX, e.clientY];
-      this._dragButton = e.button;
-    }, { signal });
-    window.addEventListener('mousemove', (e) => {
-      if (this._dragging && e.which === 0) this._dragging = false;
-    }, { signal });
-    window.addEventListener('mouseup', (e) => {
-      if (this.gizmo.isActive()) this.gizmo.endDrag();
-      if (e.button === this._dragButton) this._dragging = false;
-    }, { signal });
-    c.addEventListener('mousemove', (e) => {
-      const rect = c.getBoundingClientRect();
-      const dpr = this.renderer.width / rect.width;
-      const sx = (e.clientX - rect.left) * dpr;
-      const sy = (e.clientY - rect.top) * dpr;
-      if (this.gizmo.isActive()) {
-        this.gizmo.onDrag(sx, sy, this.camera, this.cloud, this.cloudTransform);
-        this.camera.markDirty();
-        return;
-      }
-      if (this.gizmo.mode !== 'none' && this.cloud && !this._dragging) {
-        this.gizmo.setHovered(this.gizmo.hitTest(sx, sy, this.camera, this.cloud));
-      }
-      if (!this._dragging) return;
-      const dx = (e.clientX - this._lastMouse[0]) * dpr;
-      const dy = (e.clientY - this._lastMouse[1]) * dpr;
-      this._lastMouse = [e.clientX, e.clientY];
-      if (this._dragButton === 2) {
-        this.camera.panX += dx;
-        this.camera.panY += dy;
-        this.camera.markDirty();
-      } else {
-        this.camera.rotateHorizontal(-dx * 0.003);
-        this.camera.rotateVertical(-dy * 0.15);
-      }
-    }, { signal });
-    c.addEventListener('contextmenu', (e) => e.preventDefault(), { signal });
-    c.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const rect = c.getBoundingClientRect();
-      const dpr = this.renderer.width / rect.width;
-      const sx = (e.clientX - rect.left) * dpr;
-      const sy = (e.clientY - rect.top)  * dpr;
-      const factor = e.deltaY > 0 ? 0.85 : 1.15;
-      this.camera.zoomAt(factor, sx, sy, this.renderer.width, this.renderer.height);
+    if (this.cloud) {
+      this.cloud.dispose();
+      this.cloud = null;
+    }
+    this.minimap.clearCache();
+    this.clearMeasurement();
+    this.cloudTransform.reset();
+    this.gizmo.setMode('none');
+
+    const loading = document.getElementById('loading');
+    loading.classList.add('visible');
+    document.getElementById('loading-text').textContent = 'Loading Potree dataset…';
+
+    try {
+      if (this._potreeLoader) this._potreeLoader.dispose();
+      const loader = new PotreeLoader();
+      this._potreeLoader = loader;
+      const geometry = await loader.load(url);
+
+      document.getElementById('loading-text').textContent = 'Preparing…';
+
+      const bb = geometry.boundingBox;
+      const _center = new THREE.Vector3();
+      bb.getCenter(_center);
+      const center = [_center.x, _center.y, _center.z];
+
+      const hasIntensity = geometry.attributes.some(a => a.name === 'INTENSITY');
+      const data = {
+        count: geometry.root ? geometry.root.numPoints : 0,
+        positions: null,
+        colors: null,
+        intensity: null,
+        hasColor: geometry.attributes.some(a => a.name === 'RGBA' || a.name === 'RGB'),
+        hasIntensity,
+        bounds: { min: [bb.min.x, bb.min.y, bb.min.z], max: [bb.max.x, bb.max.y, bb.max.z] },
+        center,
+        zMin: bb.min.z,
+        zMax: bb.max.z,
+        intensityMin: 0,
+        intensityMax: hasIntensity ? 1 : 0,
+        octreeGeometry: geometry,
+      };
+
+      this.cloud = new PointCloud(data);
+      this.cloud.renderer = this.renderer;
+      this.cloud.pointBudget = this._pointBudget;
+
+      this.camera.setRefCenter(this.cloud.center);
+      this._fitView();
+      this.camera.markDirty();
+
       document.getElementById('zoom-slider').value = this.camera.zoom;
       document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-    }, { passive: false, signal });
+      document.getElementById('rot-offset').value = this.camera.viewOffsetDeg;
+      document.getElementById('rot-offset-val').textContent = this.camera.viewOffsetDeg + '°';
+      document.getElementById('file-info').innerHTML =
+        `${url}<br/>${this.cloud.count.toLocaleString()} points<br/>Potree v2.0 (streaming)<br/>` +
+        (this.cloud.hasColor ? 'RGB ✓  ' : '') +
+        (this.cloud.hasIntensity ? 'Intensity ✓' : '');
 
-    let lastClickTime = 0;
-    c.addEventListener('dblclick', (e) => {
-      e.preventDefault();
-      this.camera.reset();
-      if (this.cloud) this._fitView();
-      document.getElementById('zoom-slider').value = this.camera.zoom;
-      document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-    }, { signal });
+      this._streamStartTime = performance.now();
 
-    window.addEventListener('keydown', (e) => {
-      if (!this.cloud) return;
-      const panSpeed = 20;
-
-      switch(e.key.toLowerCase()) {
-        case 'arrowup':
-        case 'w':
-          e.preventDefault();
-          this.camera.panY += panSpeed;
-          this.camera.markDirty();
-          break;
-        case 'arrowdown':
-        case 's':
-          e.preventDefault();
-          this.camera.panY -= panSpeed;
-          this.camera.markDirty();
-          break;
-        case 'arrowleft':
-        case 'a':
-          e.preventDefault();
-          this.camera.panX -= panSpeed;
-          this.camera.markDirty();
-          break;
-        case 'arrowright':
-        case 'd':
-          e.preventDefault();
-          this.camera.panX += panSpeed;
-          this.camera.markDirty();
-          break;
-        case 'q':
-          e.preventDefault();
-          this.camera.rotateLeft();
-          this._fitView();
-          break;
-        case 'e':
-          e.preventDefault();
-          this.camera.rotateRight();
-          this._fitView();
-          break;
-        case '+':
-        case '=':
-          e.preventDefault();
-          this.camera.zoomAt(1.15, this.renderer.width * 0.5, this.renderer.height * 0.5, this.renderer.width, this.renderer.height);
-          document.getElementById('zoom-slider').value = this.camera.zoom;
-          document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-          break;
-        case '-':
-        case '_':
-          e.preventDefault();
-          this.camera.zoomAt(0.85, this.renderer.width * 0.5, this.renderer.height * 0.5, this.renderer.width, this.renderer.height);
-          document.getElementById('zoom-slider').value = this.camera.zoom;
-          document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-          break;
-        case 'r':
-          e.preventDefault();
-          this.camera.reset();
-          this._fitView();
-          document.getElementById('zoom-slider').value = this.camera.zoom;
-          document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-          break;
-        case 'g':
-          e.preventDefault();
-          this.gizmo.toggleMode();
-          if (this.gizmo.mode === 'none') this.cloudTransform.reset();
-          this.camera.markDirty();
-          break;
-      }
-    }, { signal });
-
-    let lastTouchDist = 0;
-    c.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 1) {
-        if (this.gizmo.mode !== 'none' && this.cloud) {
-          const rect = c.getBoundingClientRect();
-          const dpr = this.renderer.width / rect.width;
-          const sx = (e.touches[0].clientX - rect.left) * dpr;
-          const sy = (e.touches[0].clientY - rect.top) * dpr;
-          const hit = this.gizmo.hitTest(sx, sy, this.camera, this.cloud);
-          if (hit) {
-            this.gizmo.startDrag(hit, sx, sy);
-            this.camera.markDirty();
-            this._dragging = false;
-            return;
-          }
-        }
-        this._dragging = true;
-        this._lastMouse = [e.touches[0].clientX, e.touches[0].clientY];
-      } else if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        lastTouchDist = Math.sqrt(dx*dx + dy*dy);
-      }
-    }, { passive: true, signal });
-    c.addEventListener('touchmove', (e) => {
-      const rect = c.getBoundingClientRect();
-      const dpr = this.renderer.width / rect.width;
-      if (e.touches.length === 1) {
-        if (this.gizmo.isActive()) {
-          const sx = (e.touches[0].clientX - rect.left) * dpr;
-          const sy = (e.touches[0].clientY - rect.top) * dpr;
-          this.gizmo.onDrag(sx, sy, this.camera, this.cloud, this.cloudTransform);
-          this.camera.markDirty();
-          return;
-        }
-        if (this._dragging) {
-          const dx = (e.touches[0].clientX - this._lastMouse[0]) * dpr;
-          const dy = (e.touches[0].clientY - this._lastMouse[1]) * dpr;
-          this._lastMouse = [e.touches[0].clientX, e.touches[0].clientY];
-          this.camera.rotateHorizontal(-dx * 0.003);
-          this.camera.rotateVertical(-dy * 0.15);
-        }
-      } else if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (lastTouchDist > 0) {
-          const mx = ((e.touches[0].clientX + e.touches[1].clientX) * 0.5 - rect.left) * dpr;
-          const my = ((e.touches[0].clientY + e.touches[1].clientY) * 0.5 - rect.top)  * dpr;
-          this.camera.zoomAt(dist / lastTouchDist, mx, my, this.renderer.width, this.renderer.height);
-          document.getElementById('zoom-slider').value = this.camera.zoom;
-          document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-        }
-        lastTouchDist = dist;
-      }
-    }, { passive: true, signal });
-    c.addEventListener('touchend', () => {
-      if (this.gizmo.isActive()) this.gizmo.endDrag();
-      this._dragging = false;
-    }, { signal });
-
-    c.addEventListener('click', (e) => {
-      if (!this.measurement.active || !this.cloud) return;
-      const rect = c.getBoundingClientRect();
-      const dpr = this.renderer.width / rect.width;
-      const sx = (e.clientX - rect.left) * dpr;
-      const sy = (e.clientY - rect.top)  * dpr;
-      if (this.measurement.onClick(this.cloud, this.camera, this.renderer, sx, sy)) {
-        this.camera.markDirty();
-        this._showMeasurement();
-      }
-    }, { signal });
-
-    window.addEventListener('resize', () => this._resize(), { signal });
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to load Potree dataset: ${err.message}`);
+      this.renderer._ensureResources();
+    } finally {
+      this._loading = false;
+      loading.classList.remove('visible');
+    }
   }
 
   async loadFile(file) {
@@ -593,7 +468,7 @@ class App {
 
     this._abortController.abort();
     this._abortController = new AbortController();
-    this._bindInput();
+    bindInput(this);
 
     if (this.cloud) {
       this.cloud.dispose();
@@ -712,6 +587,11 @@ class App {
         lightDir:  this.getLightDir(),
         ambient:   this.lightAmb,
         shading:   this.shading,
+        useCloudTransform: this.gizmo.mode !== 'none',
+        cloudRot: this.cloudTransform.rotation,
+        cloudScale: this.cloudTransform.scale,
+        pointSize: this.pointSize,
+        pointSizeType: this.pointSizeType,
       });
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
@@ -764,6 +644,7 @@ class App {
       const dt = (now - this._lastTime) / 1000;
       this._lastTime = now;
 
+      this.fpsControls.update(dt);
       this.camera.update(dt);
 
       let needsRender = false;
@@ -771,7 +652,8 @@ class App {
       if (hasGeo) {
         const cameraDirty = this.camera.consumeDirty();
         const transformDirty = this.cloudTransform.consumeDirty();
-        needsRender = cameraDirty || transformDirty;
+        const nodeLoaded = this.cloud._needsRender ? (this.cloud._needsRender = false, true) : false;
+        needsRender = cameraDirty || transformDirty || nodeLoaded;
       }
       if (this.gizmo.mode !== 'none') needsRender = true;
       let lodCount = this.renderer._lastDrawCount;
@@ -782,7 +664,16 @@ class App {
           lightDir:  this.getLightDir(),
           ambient:   this.lightAmb,
           shading:   this.shading,
+          useCloudTransform: this.gizmo.mode !== 'none',
+          cloudRot: this.cloudTransform.rotation,
+          cloudScale: this.cloudTransform.scale,
+          pointSize: this.pointSize,
+          pointSizeType: this.pointSizeType,
         });
+
+        if (this.cloud && this.cloud.lru) {
+          this.cloud.lru.freeMemory();
+        }
 
         if ((this._minimapFrame++ & 3) === 0) {
           this.minimap.draw(this.cloud, this.camera, this.renderer.width, this.renderer.height);
@@ -821,10 +712,19 @@ class App {
           const views = ['N','E','S','W','NE','SE','SW','NW'];
           const vi = this.camera.viewIndex;
           const bench = this.renderer.getBench();
+          let streamHtml = '';
+          if (this.cloud && this.cloud.octreeGeometry && this.cloud.lru) {
+            const loading = this.cloud.visibilitySystem._numNodesLoading;
+            const loaded = this.cloud.lru.items.size;
+            streamHtml = `<span style="font-size:0.65rem;color:#58a6ff">Streaming: ${loaded} nodes loaded`;
+            if (loading > 0) streamHtml += `, <b>${loading}</b> loading`;
+            streamHtml += '</span><br/>';
+          }
           this._hudEl.innerHTML =
             `<b>Nuvola</b> 2.5D Viewer<br/>` +
             `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b><br/>` +
             `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
+            streamHtml +
             `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
         }
       }
@@ -838,6 +738,7 @@ class App {
   dispose() {
     this._disposed = true;
     this._abortController.abort();
+    this.fpsControls.dispose();
     if (this._activeWorker) {
       this._activeWorker.terminate();
       this._activeWorker = null;
@@ -856,6 +757,10 @@ class App {
     this.lasLoader.dispose();
     this.xyzLoader.dispose();
     this.rxpLoader.dispose();
+    if (this._potreeLoader) {
+      this._potreeLoader.dispose();
+      this._potreeLoader = null;
+    }
   }
 }
 

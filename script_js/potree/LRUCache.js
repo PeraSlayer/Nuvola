@@ -1,0 +1,82 @@
+export class LRUCache {
+  constructor() {
+    this.first = null;
+    this.last = null;
+    this.items = new Map();
+    this.numPoints = 0;
+    this.maxNumPoints = Infinity;
+  }
+
+  touch(node) {
+    const existing = this.items.get(node.id);
+    if (existing) {
+      this._moveToEnd(existing);
+    } else {
+      const item = { node, prev: null, next: null };
+      this.items.set(node.id, item);
+      this._append(item);
+    }
+  }
+
+  remove(node) {
+    const item = this.items.get(node.id);
+    if (!item) return false;
+    this._unlink(item);
+    this.items.delete(node.id);
+    this.numPoints -= node.numPoints || 0;
+    return true;
+  }
+
+  getLRUItem() {
+    return this.first;
+  }
+
+  freeMemory() {
+    while (this.numPoints > this.maxNumPoints && this.first) {
+      const item = this.first;
+      this.remove(item.node);
+      item.node.dispose();
+    }
+  }
+
+  disposeAll() {
+    let current = this.first;
+    while (current) {
+      const next = current.next;
+      current.node.dispose();
+      current = next;
+    }
+    this.first = null;
+    this.last = null;
+    this.items.clear();
+    this.numPoints = 0;
+  }
+
+  _append(item) {
+    if (!this.first) {
+      this.first = item;
+      this.last = item;
+      item.prev = null;
+      item.next = null;
+    } else {
+      this.last.next = item;
+      item.prev = this.last;
+      item.next = null;
+      this.last = item;
+    }
+    this.numPoints += item.node.numPoints || 0;
+  }
+
+  _unlink(item) {
+    if (item.prev) item.prev.next = item.next;
+    else this.first = item.next;
+    if (item.next) item.next.prev = item.prev;
+    else this.last = item.prev;
+  }
+
+  _moveToEnd(item) {
+    if (item === this.last) return;
+    this._unlink(item);
+    this._append(item);
+  }
+}

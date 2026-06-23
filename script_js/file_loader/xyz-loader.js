@@ -74,7 +74,7 @@ function parseXYZ(buf, count) {
   var positions = new Float32Array(count * 3);
   var colors = new Uint8Array(count * 3);
   var intensity = new Float32Array(count);
-  var hasColor = colorPresent || true;
+  var hasColor = !!colorPresent;
 
   // Second pass: parse lines into typed arrays
   pos = 0;

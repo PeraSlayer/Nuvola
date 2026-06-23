@@ -40,6 +40,16 @@ export class UIController {
     // --- Load / file input -------------------------------------------------
     $('btn-load').onclick = () => $('file-input').click();
     $('file-input').onchange = (e) => { if (e.target.files[0]) a.loadFile(e.target.files[0]); };
+    $('btn-load-potree').onclick = () => {
+      const url = $('potree-url').value.trim();
+      if (url) a.loadPotreeDataset(url);
+    };
+    $('potree-url').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const url = e.target.value.trim();
+        if (url) a.loadPotreeDataset(url);
+      }
+    });
 
     // --- Zoom slider -------------------------------------------------------
     $('zoom-slider').oninput = (e) => {
@@ -130,6 +140,17 @@ export class UIController {
       };
     });
 
+    // --- Point Size -------------------------------------------------------
+    $('point-size-type').onchange = (e) => {
+      a.pointSizeType = +e.target.value;
+      a.camera.markDirty();
+    };
+    $('point-size').oninput = (e) => {
+      a.pointSize = +e.target.value;
+      $('point-size-val').textContent = (+e.target.value).toFixed(1);
+      a.camera.markDirty();
+    };
+
     // --- Lighting ----------------------------------------------------------
     $('light-az').oninput  = (e) => { a.lightAz  = +e.target.value; $('light-az-val').textContent  = a.lightAz  + '°'; a.camera.markDirty(); };
     $('light-el').oninput  = (e) => { a.lightEl  = +e.target.value; $('light-el-val').textContent  = a.lightEl  + '°'; a.camera.markDirty(); };
@@ -140,6 +161,14 @@ export class UIController {
     $('chk-range-decimation').onchange = (e) => { a.enableRangeDecimation = e.target.checked; a.camera.markDirty(); };
     $('min-detail-points').oninput = (e) => { a.minPointsForDetail = +e.target.value; $('min-detail-val').textContent = (a.minPointsForDetail/1000).toFixed(0) + 'k'; a.camera.markDirty(); };
     $('max-dist-ratio').oninput = (e) => { a.maxDistanceRatio = +e.target.value; $('max-dist-ratio-val').textContent = a.maxDistanceRatio.toFixed(2); a.camera.markDirty(); };
+
+    // --- Point Budget (Potree LOD) -----------------------------------------
+    $('point-budget').oninput = (e) => {
+      const val = +e.target.value;
+      a.pointBudget = val;
+      $('point-budget-val').textContent = (val / 1e6).toFixed(1) + 'M';
+      a.camera.markDirty();
+    };
 
     // --- Measurement -------------------------------------------------------
     $('btn-measure').onclick = () => {

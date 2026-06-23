@@ -1,0 +1,48 @@
+{
+  "version": "2.0",
+  "name": "potree-test",
+  "description": "Synthetic test dataset",
+  "spacing": 1.0,
+  "scale": 1.0,
+  "offset": [
+    0,
+    0,
+    0
+  ],
+  "boundingBox": {
+    "lx": -5.535526217088115,
+    "ly": -5.290415810565133,
+    "lz": -5.436541084868965,
+    "ux": 5.288237640396085,
+    "uy": 5.533348046919068,
+    "uz": 5.387222772615235
+  },
+  "tightBoundingBox": {
+    "lx": -4.978446216485736,
+    "ly": -4.74989244777333,
+    "lz": -4.944551818619683,
+    "ux": 4.731157639793706,
+    "uy": 4.992824684127266,
+    "uz": 4.895233506365953
+  },
+  "attributes": [
+    {
+      "name": "POSITION_CARTESIAN",
+      "type": "float",
+      "size": 12,
+      "numElements": 3,
+      "elementSize": 4
+    },
+    {
+      "name": "RGB",
+      "type": "uint8",
+      "size": 3,
+      "numElements": 3,
+      "elementSize": 1
+    }
+  ],
+  "hierarchy": {
+    "firstChunkSize": 1
+  },
+  "projection": null
+}

@@ -3,6 +3,7 @@ export const POINT_VERTEX_SHADER = `#version 300 es
   in vec3 a_position;
   in vec3 a_color;
   in float a_intensity;
+  in float a_classification;
   uniform vec2 u_resolution;
   uniform vec2 u_pan;
   uniform float u_zoom;
@@ -16,9 +17,34 @@ export const POINT_VERTEX_SHADER = `#version 300 es
   uniform bool u_useCloudTransform;
   uniform vec3 u_cloudRot;
   uniform vec3 u_cloudScale;
+  uniform float u_pointSize;
+  uniform int u_pointSizeType;
+  uniform int u_cameraMode;
+  uniform mat4 u_viewMatrix;
+  uniform mat4 u_projMatrix;
   out vec3 v_color;
   out float v_depth;
   out float v_height;
+
+  const vec3 CLASS_COLORS[16] = vec3[16](
+    vec3(0.5, 0.5, 0.5),
+    vec3(0.7, 0.7, 0.7),
+    vec3(0.55, 0.27, 0.07),
+    vec3(0.0, 1.0, 0.0),
+    vec3(0.0, 0.8, 0.0),
+    vec3(0.0, 0.5, 0.0),
+    vec3(1.0, 0.0, 0.0),
+    vec3(0.4, 0.4, 0.4),
+    vec3(0.9, 0.9, 0.0),
+    vec3(0.0, 0.5, 1.0),
+    vec3(0.9, 0.8, 0.7),
+    vec3(0.8, 0.8, 0.8),
+    vec3(0.6, 0.6, 0.6),
+    vec3(0.5, 0.5, 0.5),
+    vec3(0.5, 0.5, 0.5),
+    vec3(0.5, 0.5, 0.5)
+  );
+
   void main() {
       vec3 local = a_position - u_center;
       if (u_useCloudTransform) {
@@ -36,27 +62,43 @@ export const POINT_VERTEX_SHADER = `#version 300 es
         float y2 = local.x * sz + local.y * cz;
         local.x = x2; local.y = y2;
       }
-      float cosX = cos(u_rotX), sinX = sin(u_rotX);
-      float y1 = local.y * cosX - local.z * sinX;
-      float z1 = local.y * sinX + local.z * cosX;
-      local.y = y1;
-      local.z = z1;
-      float cosY = cos(u_rotY), sinY = sin(u_rotY);
-      float x1 = local.x * cosY + local.z * sinY;
-      float z2 = -local.x * sinY + local.z * cosY;
-      local.x = x1;
-      local.z = z2;
-      float c = cos(u_rot), s = sin(u_rot);
-      float rx = local.x * c - local.y * s;
-      float ry = local.x * s + local.y * c;
-      float sx = (rx - ry) * u_zoom + u_pan.x;
-      float sy = ((rx + ry) * 0.5 - local.z) * u_zoom + u_pan.y;
-      float invW = 2.0 / u_resolution.x;
-      float invH = 2.0 / u_resolution.y;
-      float dKey = rx + ry - local.z;
-      float dNorm = (dKey - u_depthMin) / max(u_depthMax - u_depthMin, 1e-6);
-      gl_Position = vec4(sx * invW - 1.0, 1.0 - sy * invH, dNorm * 2.0 - 1.0, 1.0);
-      gl_PointSize = clamp(u_zoom * 2.5, 1.0, 6.0);
+
+      float dNorm;
+      if (u_cameraMode == 1) {
+        vec4 worldPos = vec4(a_position, 1.0);
+        vec4 viewPos = u_viewMatrix * worldPos;
+        vec4 clipPos = u_projMatrix * viewPos;
+        gl_Position = clipPos;
+        dNorm = clamp((-viewPos.z - 0.1) / 9999.9, 0.0, 1.0);
+        gl_PointSize = clamp(u_pointSize * 300.0 / max(-viewPos.z, 0.1), 1.0, 50.0);
+      } else {
+        float cosX = cos(u_rotX), sinX = sin(u_rotX);
+        float y1 = local.y * cosX - local.z * sinX;
+        float z1 = local.y * sinX + local.z * cosX;
+        local.y = y1;
+        local.z = z1;
+        float cosY = cos(u_rotY), sinY = sin(u_rotY);
+        float x1 = local.x * cosY + local.z * sinY;
+        float z2 = -local.x * sinY + local.z * cosY;
+        local.x = x1;
+        local.z = z2;
+        float c = cos(u_rot), s = sin(u_rot);
+        float rx = local.x * c - local.y * s;
+        float ry = local.x * s + local.y * c;
+        float sx = (rx - ry) * u_zoom + u_pan.x;
+        float sy = ((rx + ry) * 0.5 - local.z) * u_zoom + u_pan.y;
+        float invW = 2.0 / u_resolution.x;
+        float invH = 2.0 / u_resolution.y;
+        float dKey = rx + ry - local.z;
+        dNorm = (dKey - u_depthMin) / max(u_depthMax - u_depthMin, 1e-6);
+        gl_Position = vec4(sx * invW - 1.0, 1.0 - sy * invH, dNorm * 2.0 - 1.0, 1.0);
+        if (u_pointSizeType == 0) {
+          gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
+        } else {
+          gl_PointSize = clamp(u_zoom * 2.5, 1.0, 6.0);
+        }
+      }
+
       v_depth = dNorm;
       v_height = (a_position.z - u_center.z - u_zMin) / max(u_zMax - u_zMin, 1e-6);
       if (u_colorMode == 0) v_color = a_color;
@@ -66,6 +108,9 @@ export const POINT_VERTEX_SHADER = `#version 300 es
       } else if (u_colorMode == 2) {
         float t = (a_intensity - u_iMin) / max(u_iMax - u_iMin, 1e-6);
         v_color = vec3(clamp(t, 0.0, 1.0));
+      } else if (u_colorMode == 4) {
+        int ci = min(int(a_classification), 15);
+        v_color = CLASS_COLORS[ci];
       } else v_color = vec3(v_depth);
   }`;
 

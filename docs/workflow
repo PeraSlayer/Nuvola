@@ -1,0 +1,510 @@
+# AI Development Workflow
+
+> Mandatory workflow for all AI agents contributing to this repository.
+
+---
+
+# Purpose
+
+This document defines the required development workflow for AI coding agents.
+
+The objective is to maximize:
+
+* correctness
+* architectural consistency
+* maintainability
+* code quality
+* predictability
+
+Following this workflow is mandatory.
+
+Skipping steps is considered a failure.
+
+---
+
+# Fundamental Rule
+
+Never begin writing code immediately.
+
+Always understand the problem before attempting a solution.
+
+A correct understanding is more valuable than fast code generation.
+
+---
+
+# Development Lifecycle
+
+Every task follows the same lifecycle.
+
+1. Understand
+2. Explore
+3. Plan
+4. Verify
+5. Implement
+6. Validate
+7. Review
+8. Document
+
+Never skip a stage.
+
+---
+
+# Phase 1 — Understand the Request
+
+Before touching the repository, determine:
+
+* What is being requested?
+* Why is it needed?
+* Which subsystem is affected?
+* What are the expected outcomes?
+* What assumptions are unsafe?
+
+If the request is ambiguous, resolve the ambiguity before implementation.
+
+Never guess user intent.
+
+---
+
+# Phase 2 — Explore the Repository
+
+Inspect the relevant parts of the project.
+
+Read:
+
+* related files
+* imports
+* exports
+* interfaces
+* configuration
+* tests
+* documentation
+
+Understand how the existing implementation works.
+
+Never modify code you have not read.
+
+---
+
+# Phase 3 — Identify Existing Solutions
+
+Before creating anything new, search for:
+
+* existing classes
+* utilities
+* managers
+* renderers
+* helpers
+* services
+* abstractions
+
+Reuse existing implementations whenever possible.
+
+Avoid duplicate logic.
+
+---
+
+# Phase 4 — Verify APIs
+
+Before calling any API, confirm that it exists.
+
+Verify:
+
+* method names
+* constructor signatures
+* exported symbols
+* package versions
+* supported options
+
+Never invent APIs.
+
+If verification is impossible, stop and explain the uncertainty.
+
+---
+
+# Phase 5 — Design the Solution
+
+Think before coding.
+
+Document mentally:
+
+* affected modules
+* dependencies
+* ownership
+* data flow
+* lifecycle
+* error handling
+* performance implications
+
+The simplest correct design is preferred.
+
+---
+
+# Phase 6 — Evaluate Architectural Impact
+
+Ask:
+
+Does this fit the existing architecture?
+
+Does this duplicate functionality?
+
+Can existing components be extended?
+
+Will this increase maintenance cost?
+
+Architectural consistency takes priority over novelty.
+
+---
+
+# Phase 7 — Implement Incrementally
+
+Large changes should be divided into small logical steps.
+
+Each change should:
+
+* compile independently
+* remain understandable
+* preserve functionality
+* minimize risk
+
+Avoid large rewrites.
+
+---
+
+# Phase 8 — Self Verification
+
+Before considering implementation complete, verify:
+
+Correctness
+
+Performance
+
+Memory usage
+
+Architecture
+
+Naming
+
+Readability
+
+Error handling
+
+Backward compatibility
+
+No duplicate logic
+
+No invented APIs
+
+Every modification must pass all checks.
+
+---
+
+# Hallucination Prevention Protocol
+
+Whenever uncertainty exists:
+
+Stop.
+
+Do not fabricate.
+
+Instead:
+
+* inspect more files
+* inspect documentation
+* inspect existing implementations
+
+If uncertainty remains:
+
+Explain it.
+
+Never generate speculative code.
+
+---
+
+# Decision Tree
+
+Before adding new code:
+
+Does an equivalent implementation already exist?
+
+↓
+
+Yes
+
+Reuse or extend it.
+
+↓
+
+No
+
+Can an existing abstraction solve the problem?
+
+↓
+
+Yes
+
+Extend the abstraction.
+
+↓
+
+No
+
+Introduce a new implementation with clear justification.
+
+---
+
+# File Modification Policy
+
+Modify the smallest number of files necessary.
+
+Avoid touching unrelated files.
+
+Avoid cosmetic changes mixed with functional changes.
+
+One logical concern per change.
+
+---
+
+# Refactoring Policy
+
+Refactor only when:
+
+* it improves readability
+* it reduces duplication
+* it fixes architectural issues
+* it improves maintainability
+
+Never refactor for personal preference.
+
+---
+
+# Dependency Policy
+
+Before adding a dependency ask:
+
+Can native JavaScript solve this?
+
+Does the project already contain equivalent functionality?
+
+Will this dependency remain maintained?
+
+Can this dependency be removed later?
+
+Prefer fewer dependencies.
+
+---
+
+# Performance Review
+
+Every implementation should answer:
+
+How many allocations occur?
+
+How many GPU uploads occur?
+
+How much memory is used?
+
+How often does this execute?
+
+Can this be cached?
+
+Can this be incremental?
+
+Performance awareness should exist before optimization.
+
+---
+
+# Error Handling Workflow
+
+Every failure path should be considered.
+
+Questions:
+
+What happens if loading fails?
+
+What happens if memory is exhausted?
+
+What happens if data is malformed?
+
+What happens if a node disappears?
+
+Avoid assuming the happy path.
+
+---
+
+# Documentation Policy
+
+Update documentation whenever:
+
+Public APIs change.
+
+Architecture changes.
+
+Workflow changes.
+
+Behavior changes.
+
+Documentation is part of the implementation.
+
+---
+
+# Code Review Checklist
+
+Before finishing:
+
+* Clear naming.
+* Single responsibility.
+* No duplicated logic.
+* No unnecessary abstraction.
+* No dead code.
+* No debug leftovers.
+* No temporary workarounds.
+* Correct error handling.
+* Memory ownership understood.
+* Performance considered.
+* Documentation updated if required.
+
+---
+
+# Incremental Thinking
+
+When solving a large problem:
+
+Break it into:
+
+Problem
+
+↓
+
+Subsystem
+
+↓
+
+Component
+
+↓
+
+Function
+
+↓
+
+Implementation
+
+Never solve the entire problem in one step.
+
+---
+
+# Architectural Integrity
+
+Every modification should make the project more coherent.
+
+Never increase coupling unnecessarily.
+
+Prefer:
+
+high cohesion
+
+low coupling
+
+clear ownership
+
+predictable lifecycles
+
+---
+
+# Communication Guidelines
+
+When explaining completed work:
+
+Describe:
+
+What changed.
+
+Why it changed.
+
+Architectural impact.
+
+Performance impact.
+
+Potential limitations.
+
+Future extension points.
+
+Avoid vague summaries.
+
+---
+
+# Recovery Strategy
+
+If an implementation proves incorrect:
+
+Do not hide the mistake.
+
+Identify the root cause.
+
+Explain it.
+
+Correct it.
+
+Learn from it.
+
+Correctness is more valuable than preserving previous work.
+
+---
+
+# Continuous Validation
+
+After every significant change ask:
+
+Would a new contributor immediately understand this?
+
+Does it follow existing conventions?
+
+Does it introduce hidden complexity?
+
+Can this be simplified?
+
+Repeat until the answer is "yes."
+
+---
+
+# Final Workflow Checklist
+
+Before any task is considered complete:
+
+✓ Request fully understood.
+
+✓ Relevant repository explored.
+
+✓ Existing implementations reviewed.
+
+✓ APIs verified.
+
+✓ Architecture respected.
+
+✓ Minimal modification performed.
+
+✓ No duplicated functionality.
+
+✓ Naming consistent.
+
+✓ Error handling complete.
+
+✓ Performance considered.
+
+✓ Memory implications evaluated.
+
+✓ Documentation updated.
+
+✓ Self review completed.
+
+Only after every item is satisfied should the task be considered finished.
+
+---
+
+# Final Principle
+
+The fastest code generation is rarely the best development strategy.
+
+Professional engineering is the result of disciplined observation, deliberate planning, incremental implementation, and rigorous validation.
+
+The workflow exists to ensure every change improves the project rather than merely adding code.

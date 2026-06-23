@@ -1,4 +1,5 @@
 const _proj = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+const VIEWPORT_CULL_MARGIN_PX = 40;
 
 export function extractCamParams(camera) {
   const rxd = camera.rotationXDeg, ryd = camera.rotationYDeg;
@@ -38,7 +39,7 @@ export function projectBounds(node, cp, out) {
 }
 
 function visibleOnScreen(proj, w, h) {
-  return !(proj.maxX < -40 || proj.minX > w + 40 || proj.maxY < -40 || proj.minY > h + 40);
+  return !(proj.maxX < -VIEWPORT_CULL_MARGIN_PX || proj.minX > w + VIEWPORT_CULL_MARGIN_PX || proj.maxY < -VIEWPORT_CULL_MARGIN_PX || proj.minY > h + VIEWPORT_CULL_MARGIN_PX);
 }
 
 export function collectVisibleLeaves(node, cp, w, h, out) {

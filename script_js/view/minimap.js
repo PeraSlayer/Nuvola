@@ -23,7 +23,7 @@ export class MiniMap {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     
-    // NUOVO: Canvas offscreen per memorizzare i punti statici
+    // Offscreen canvas to cache static point cloud rendering
     this.bgCanvas = document.createElement('canvas');
     this.bgCtx = this.bgCanvas.getContext('2d');
     this.isCached = false;
@@ -80,7 +80,7 @@ export class MiniMap {
     ctx.clearRect(0, 0, this.bgCanvas.width, this.bgCanvas.height);
   }
 
-  // NUOVO: Metodo isolato per disegnare i punti una volta sola
+  // Caches point cloud rendering to offscreen canvas to avoid redrawing every frame
   _cachePointCloud(cloud, w, h) {
     const ctx = this.bgCtx;
     ctx.clearRect(0, 0, w, h);
