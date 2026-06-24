@@ -112,6 +112,7 @@ export class Renderer {
     this._dynamicIndexBufSize = 0;
 
     this._benchFrameMs = 0;
+    this._profile = null;
     this._contextLost = false;
 
     this._cloudRotBuf = new Float32Array(3);
@@ -716,6 +717,10 @@ export class Renderer {
     return { frameMs: this._benchFrameMs };
   }
 
+  getProfile() {
+    return this._profile || { selectMs: 0, rebuildMs: 0, cpuMs: 0, depthMs: 0, colorMs: 0, totalMs: 0 };
+  }
+
   _createCloudVAO(cloud, indexBuffer = null) {
     const gl = this.gl;
     const vao = this._requireResource(gl.createVertexArray(), 'cloud VAO');
@@ -849,6 +854,7 @@ export class Renderer {
     const shading = opts.shading !== false;
 
     const drawCall = cloud.getDrawCall(camera, this.width, this.height);
+    const t1 = performance.now();
     const drawCount = drawCall.count;
     const hasIndices = !!drawCall.indices;
     const nodes = drawCall.nodes;
@@ -874,8 +880,13 @@ export class Renderer {
       gl.depthMask(true);
       gl.colorMask(false, false, false, false);
 
+      let rebuildMs = 0;
       if (nodes && this._batchVao) {
-        if (!this._isBatchIndexCurrent(nodes)) this._rebuildBatchIndex(nodes);
+        if (!this._isBatchIndexCurrent(nodes)) {
+          const rt0 = performance.now();
+          this._rebuildBatchIndex(nodes);
+          rebuildMs = performance.now() - rt0;
+        }
         if (this._batchTotalPoints > 0) {
           gl.bindVertexArray(this._batchVao);
           if (this._batchContiguous) {
@@ -940,6 +951,7 @@ export class Renderer {
       gl.disable(gl.BLEND);
       gl.depthMask(true);
     }
+    const t2 = performance.now();
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
@@ -961,9 +973,19 @@ export class Renderer {
     this._lightUniforms.uniform1i(this.uLight.shading, 'light.shading', shading ? 1 : 0);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const t3 = performance.now();
+
+    this._profile = {
+      selectMs: drawCall.profiling?.selectNodesMs || 0,
+      rebuildMs: rebuildMs,
+      cpuMs: t1 - t0,
+      depthMs: t2 - t1,
+      colorMs: t3 - t2,
+      totalMs: t3 - t0,
+    };
 
     this._lastDrawCount = drawCount;
-    this._benchFrameMs = performance.now() - t0;
+    this._benchFrameMs = t3 - t0;
 
     return drawCount;
   }

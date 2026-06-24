@@ -144,9 +144,11 @@ export class PointCloud {
 
   _getDrawCallPotree(camera, viewportW, viewportH) {
     const budget = Math.min(this.visibilitySystem.pointBudget, MAX_BUDGET);
+    const t0 = performance.now();
     const result = this.visibilitySystem.selectNodes(
       camera, this.octreeGeometry, viewportW, viewportH, budget
     );
+    const selectMs = performance.now() - t0;
 
     this._scheduleNodeLoads(result.unloadedNodes);
 
@@ -168,7 +170,7 @@ export class PointCloud {
     let total = 0;
     for (let i = 0; i < loadedNodes.length; i++) total += loadedNodes[i].numPoints;
 
-    return { nodes: loadedNodes, count: total, indices: null };
+    return { nodes: loadedNodes, count: total, indices: null, profiling: { selectNodesMs: selectMs } };
   }
 
   _scheduleNodeLoads(unloadedNodes) {

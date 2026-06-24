@@ -172,6 +172,7 @@ class App {
     this._lastFpsTime = performance.now();
     this._lastTime    = performance.now();
 
+    this._profile = { selectMs: 0, rebuildMs: 0, cpuMs: 0, depthMs: 0, colorMs: 0, totalMs: 0 };
     this._dragging  = false;
     this._dragButton = -1;
     this._lastMouse = [0, 0];
@@ -770,7 +771,13 @@ class App {
             streamHtml +
             batchHtml +
             threeHtml +
-            `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
+            this._profile = this.renderer.getProfile();
+            `<span style="font-size:0.65rem;color:#8b949e">CPU: <b>${this._profile.cpuMs.toFixed(1)}</b>ms`
+            + `  Depth: <b>${this._profile.depthMs.toFixed(1)}</b>`
+            + `  Color: <b>${this._profile.colorMs.toFixed(1)}</b>`
+            + `  Sel: <b>${this._profile.selectMs.toFixed(1)}</b>`
+            + `  Reb: <b>${this._profile.rebuildMs.toFixed(1)}</b>`
+            + `</span>`;
         }
       }
     } catch (err) {
