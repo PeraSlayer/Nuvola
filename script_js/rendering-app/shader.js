@@ -1,9 +1,10 @@
 export const POINT_VERTEX_SHADER = `#version 300 es
   precision highp float;
-  in vec3 a_position;
-  in vec3 a_color;
-  in float a_intensity;
-  in float a_classification;
+  layout(location = 0) in vec3 a_position;
+  layout(location = 1) in vec3 a_color;
+  layout(location = 2) in float a_intensity;
+  layout(location = 3) in float a_classification;
+  layout(location = 4) in float a_opacity;
   uniform vec2 u_resolution;
   uniform vec2 u_pan;
   uniform float u_zoom;
@@ -19,12 +20,18 @@ export const POINT_VERTEX_SHADER = `#version 300 es
   uniform vec3 u_cloudScale;
   uniform float u_pointSize;
   uniform int u_pointSizeType;
+  uniform float u_spacing;
   uniform int u_cameraMode;
   uniform mat4 u_viewMatrix;
   uniform mat4 u_projMatrix;
+  uniform float u_screenWidth;
+  uniform float u_screenHeight;
+  uniform float u_fov;
   out vec3 v_color;
   out float v_depth;
   out float v_height;
+  out float v_pointSize;
+  out float v_opacity;
 
   const vec3 CLASS_COLORS[16] = vec3[16](
     vec3(0.5, 0.5, 0.5),
@@ -65,13 +72,24 @@ export const POINT_VERTEX_SHADER = `#version 300 es
 
       float dNorm;
       if (u_cameraMode == 1) {
-        vec4 worldPos = vec4(a_position, 1.0);
-        vec4 viewPos = u_viewMatrix * worldPos;
-        vec4 clipPos = u_projMatrix * viewPos;
-        gl_Position = clipPos;
-        dNorm = clamp((-viewPos.z - 0.1) / 9999.9, 0.0, 1.0);
-        gl_PointSize = clamp(u_pointSize * 300.0 / max(-viewPos.z, 0.1), 1.0, 50.0);
-      } else {
+         vec4 worldPos = vec4(a_position, 1.0);
+         vec4 viewPos = u_viewMatrix * worldPos;
+         vec4 clipPos = u_projMatrix * viewPos;
+         gl_Position = clipPos;
+         float viewDist = -viewPos.z;
+         dNorm = clamp((viewDist - 0.1) / 9999.9, 0.0, 1.0);
+
+         if (u_pointSizeType == 0) {
+           gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
+         } else {
+           float slope = tan(u_fov * 0.5);
+           float projFactor = 0.5 * u_screenHeight / (slope * max(viewDist, 0.1));
+           float spacing = u_spacing > 0.0 ? u_spacing : 1.0;
+           float fillSize = spacing * projFactor;
+           float ps = u_pointSize * 0.25 * fillSize;
+            gl_PointSize = clamp(ps, 1.0, 8.0);
+         }
+       } else {
         float cosX = cos(u_rotX), sinX = sin(u_rotX);
         float y1 = local.y * cosX - local.z * sinX;
         float z1 = local.y * sinX + local.z * cosX;
@@ -92,12 +110,17 @@ export const POINT_VERTEX_SHADER = `#version 300 es
         float dKey = rx + ry - local.z;
         dNorm = (dKey - u_depthMin) / max(u_depthMax - u_depthMin, 1e-6);
         gl_Position = vec4(sx * invW - 1.0, 1.0 - sy * invH, dNorm * 2.0 - 1.0, 1.0);
+
         if (u_pointSizeType == 0) {
-          gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
-        } else {
-          gl_PointSize = clamp(u_zoom * 2.5, 1.0, 6.0);
-        }
-      }
+           gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
+         } else {
+           gl_PointSize = clamp(u_pointSize * max(u_zoom * 0.3, 0.5), 1.0, 50.0);
+          }
+       }
+
+      v_pointSize = gl_PointSize;
+
+      v_opacity = a_opacity;
 
       v_depth = dNorm;
       v_height = (a_position.z - u_center.z - u_zMin) / max(u_zMax - u_zMin, 1e-6);
@@ -119,11 +142,67 @@ export const POINT_FRAGMENT_SHADER = `#version 300 es
   in vec3 v_color;
   in float v_depth;
   in float v_height;
+  in float v_pointSize;
+  in float v_opacity;
   layout(location = 0) out vec4 outColor;
   layout(location = 1) out vec4 outDepth;
   void main() {
-    outColor = vec4(v_color, 1.0);
+    float dist = length(gl_PointCoord - 0.5) * 2.0;
+    float edge = max(fwidth(dist), 1.0 / v_pointSize);
+    float alpha = (1.0 - smoothstep(1.0 - edge * 2.0, 1.0, dist)) * v_opacity;
+    outColor = vec4(v_color, alpha);
     outDepth = vec4(v_depth, v_height, 0.0, 1.0);
+  }`;
+
+export const DEPTH_VERTEX_SHADER = `#version 300 es
+  precision highp float;
+  layout(location = 0) in vec3 a_position;
+  uniform vec2 u_resolution;
+  uniform vec2 u_pan;
+  uniform float u_zoom, u_rot;
+  uniform float u_rotX, u_rotY;
+  uniform vec3 u_center;
+  uniform int u_cameraMode;
+  uniform mat4 u_viewMatrix;
+  uniform mat4 u_projMatrix;
+  out float v_depth;
+  void main() {
+    vec3 local = a_position - u_center;
+    if (u_cameraMode == 1) {
+      vec4 worldPos = vec4(a_position, 1.0);
+      vec4 viewPos = u_viewMatrix * worldPos;
+      gl_Position = u_projMatrix * viewPos;
+      float viewDist = -viewPos.z;
+      v_depth = clamp((viewDist - 0.1) / 9999.9, 0.0, 1.0);
+    } else {
+      float cosX = cos(u_rotX), sinX = sin(u_rotX);
+      float y1 = local.y * cosX - local.z * sinX;
+      float z1 = local.y * sinX + local.z * cosX;
+      local.y = y1; local.z = z1;
+      float cosY = cos(u_rotY), sinY = sin(u_rotY);
+      float x1 = local.x * cosY + local.z * sinY;
+      float z2 = -local.x * sinY + local.z * cosY;
+      local.x = x1; local.z = z2;
+      float c = cos(u_rot), s = sin(u_rot);
+      float rx = local.x * c - local.y * s;
+      float ry = local.x * s + local.y * c;
+      float sx = (rx - ry) * u_zoom + u_pan.x;
+      float sy = ((rx + ry) * 0.5 - local.z) * u_zoom + u_pan.y;
+      float invW = 2.0 / u_resolution.x;
+      float invH = 2.0 / u_resolution.y;
+      gl_Position = vec4(sx * invW - 1.0, 1.0 - sy * invH, 0.5 * 2.0 - 1.0, 1.0);
+      v_depth = 0.5;
+    }
+  }`;
+
+export const DEPTH_FRAGMENT_SHADER = `#version 300 es
+  precision highp float;
+  in float v_depth;
+  layout(location = 0) out vec4 outColor;
+  layout(location = 1) out vec4 outDepth;
+  void main() {
+    outColor = vec4(0.0);
+    outDepth = vec4(v_depth, 0.0, 0.0, 1.0);
   }`;
 
 export const QUAD_VERTEX_SHADER = `#version 300 es

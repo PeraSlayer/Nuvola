@@ -474,7 +474,7 @@ $('btn-run-all').onclick = async () => {
   assertEq(typeof camera.fitToBounds, 'function', 'fitToBounds() exists');
   assertEq(typeof camera.getUniforms, 'function', 'getUniforms() exists');
   assertEq(typeof camera.isometricCamera, 'object', 'isometricCamera exists');
-  assertEq(typeof camera.fpsCamera, 'object', 'fpsCamera exists');
+  assertEq(typeof camera.perspectiveCamera, 'object', 'perspectiveCamera exists (THREE.PerspectiveCamera)');
 
   // Test isometric mode uniforms
   const isoUniforms = camera.getUniforms(renderer.width, renderer.height, cloud);
@@ -506,12 +506,12 @@ $('btn-run-all').onclick = async () => {
 
   // Test FPS camera methods
   camera.switchMode(); // back to FPS
-  camera.fpsCamera.orbit(0.1, -0.05);
-  assert(camera.fpsCamera.yaw !== 0, 'FPS orbit changed yaw');
-  camera.fpsCamera.zoom(1.5);
-  assert(camera.fpsCamera.radius !== 100, 'FPS zoom changed radius');
-  camera.fpsCamera.reset();
-  assertEq(camera.fpsCamera.yaw, 0, 'FPS reset yaw');
+  camera.orbit(0.1, -0.05);
+  assert(camera._spherical.theta !== Math.PI / 4, 'FPS orbit changed theta');
+  camera.dolly(1.5);
+  assert(camera._spherical.radius !== 100, 'FPS dolly changed radius');
+  camera.reset();
+  assertEq(camera._spherical.radius, 100, 'FPS reset radius');
   camera.switchMode(); // back to isometric
 
   // --- Bug fixes ---

@@ -4,7 +4,9 @@ export class LRUCache {
     this.last = null;
     this.items = new Map();
     this.numPoints = 0;
+    this.gpuBytes = 0;
     this.maxNumPoints = Infinity;
+    this.maxGPUBytes = 512 * 1024 * 1024;
   }
 
   touch(node) {
@@ -24,6 +26,8 @@ export class LRUCache {
     this._unlink(item);
     this.items.delete(node.id);
     this.numPoints -= node.numPoints || 0;
+    this.gpuBytes -= node._gpuBytes || 0;
+    if (this.gpuBytes < 0) this.gpuBytes = 0;
     return true;
   }
 
@@ -32,7 +36,7 @@ export class LRUCache {
   }
 
   freeMemory() {
-    while (this.numPoints > this.maxNumPoints && this.first) {
+    while (this.first && (this.numPoints > this.maxNumPoints || this.gpuBytes > this.maxGPUBytes)) {
       const item = this.first;
       this.remove(item.node);
       item.node.dispose();
@@ -50,6 +54,11 @@ export class LRUCache {
     this.last = null;
     this.items.clear();
     this.numPoints = 0;
+    this.gpuBytes = 0;
+  }
+
+  getGPUUsageMB() {
+    return (this.gpuBytes / (1024 * 1024)).toFixed(1);
   }
 
   _append(item) {
@@ -65,6 +74,7 @@ export class LRUCache {
       this.last = item;
     }
     this.numPoints += item.node.numPoints || 0;
+    this.gpuBytes += item.node._gpuBytes || 0;
   }
 
   _unlink(item) {

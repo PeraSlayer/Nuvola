@@ -32,7 +32,7 @@ import { Renderer }        from '../rendering-app/renderer.js';
 import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
 import { UIController }    from '../view/ui-controller.js';
-import { FPSControls }     from '../view/fps-controls.js';
+import { FPSControls }     from '../view/fps-controls.js?v=3';
 import * as THREE from 'three';
 import { PotreeLoader }    from '../potree/PotreeLoader.js';
 import { bindInput }        from './input.js';
@@ -144,7 +144,7 @@ class App {
 
     this.renderer    = new Renderer(this.canvas);
     this.camera      = new CameraController();
-    this.fpsControls = new FPSControls(this.canvas, this.camera.fpsCamera);
+    this.fpsControls = new FPSControls(this.canvas, this.camera);
     this.measurement = new MeasurementTool();
     this.minimap     = new MiniMap(document.getElementById('minimap-canvas'));
     this.ui          = new UIController(this);
@@ -161,7 +161,7 @@ class App {
     this.enableRangeDecimation = true;
     this.minPointsForDetail = 50000;
     this.maxDistanceRatio = 1.0;
-    this._pointBudget = 1000000;
+    this._pointBudget = 5000000;
     this.pointSize = 3.0;
     this.pointSizeType = 1;
 
@@ -393,13 +393,15 @@ class App {
       const center = [_center.x, _center.y, _center.z];
 
       const hasIntensity = geometry.attributes.some(a => a.name === 'INTENSITY');
+      const hasClassification = geometry.attributes.some(a => a.name === 'CLASSIFICATION');
       const data = {
-        count: geometry.root ? geometry.root.numPoints : 0,
+        count: geometry.totalPoints || 0,
         positions: null,
         colors: null,
         intensity: null,
         hasColor: geometry.attributes.some(a => a.name === 'RGBA' || a.name === 'RGB'),
         hasIntensity,
+        hasClassification,
         bounds: { min: [bb.min.x, bb.min.y, bb.min.z], max: [bb.max.x, bb.max.y, bb.max.z] },
         center,
         zMin: bb.min.z,
@@ -424,14 +426,16 @@ class App {
       document.getElementById('file-info').innerHTML =
         `${url}<br/>${this.cloud.count.toLocaleString()} points<br/>Potree v2.0 (streaming)<br/>` +
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
-        (this.cloud.hasIntensity ? 'Intensity ✓' : '');
+        (this.cloud.hasIntensity ? 'Intensity ✓  ' : '') +
+        (this.cloud.hasClassification ? 'Class. ✓' : '');
+      this._updateClassificationButton();
 
       this._streamStartTime = performance.now();
 
     } catch (err) {
       console.error(err);
       alert(`Failed to load Potree dataset: ${err.message}`);
-      this.renderer._ensureResources();
+      this.renderer.restoreGPUState();
     } finally {
       this._loading = false;
       loading.classList.remove('visible');
@@ -485,8 +489,8 @@ class App {
 
     let buf, data, procResult;
     try {
-      if (file.size > 500 * 1024 * 1024) {
-        throw new Error(`File troppo grande (${(file.size / 1024 / 1024).toFixed(1)}MB). Limite: 500MB.`);
+      if (file.size > 4 * 1024 * 1024 * 1024) {
+        throw new Error(`File troppo grande (${(file.size / 1024 / 1024).toFixed(1)}MB). Limite: 4GB.`);
       }
 
       buf = await readMethod(file);
@@ -602,11 +606,12 @@ class App {
         `${file.name}<br/>${this.cloud.count.toLocaleString()} points<br/>${format}<br/>` +
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
         (this.cloud.hasIntensity ? 'Intensity ✓' : '');
+      this._updateClassificationButton();
 
     } catch (err) {
       console.error(err);
       alert(`Failed to load ${format} file: ${err.message}`);
-      this.renderer._ensureResources();
+      this.renderer.restoreGPUState();
     } finally {
       data = null;
       procResult = null;
@@ -652,7 +657,10 @@ class App {
       if (hasGeo) {
         const cameraDirty = this.camera.consumeDirty();
         const transformDirty = this.cloudTransform.consumeDirty();
-        const nodeLoaded = this.cloud._needsRender ? (this.cloud._needsRender = false, true) : false;
+        const nodeLoaded = this.cloud.consumeNeedsRender();
+        if (cameraDirty && this.cloud && this.cloud.octreeGeometry) {
+          this.cloud.visibilitySystem.invalidateCache();
+        }
         needsRender = cameraDirty || transformDirty || nodeLoaded;
       }
       if (this.gizmo.mode !== 'none') needsRender = true;
@@ -714,15 +722,18 @@ class App {
           const bench = this.renderer.getBench();
           let streamHtml = '';
           if (this.cloud && this.cloud.octreeGeometry && this.cloud.lru) {
-            const loading = this.cloud.visibilitySystem._numNodesLoading;
+            const loading = this.cloud.visibilitySystem.numNodesLoading;
             const loaded = this.cloud.lru.items.size;
             streamHtml = `<span style="font-size:0.65rem;color:#58a6ff">Streaming: ${loaded} nodes loaded`;
             if (loading > 0) streamHtml += `, <b>${loading}</b> loading`;
             streamHtml += '</span><br/>';
           }
+          const camLabel = this.camera.activeMode === 'fps'
+            ? `Drone · Speed: <b>${this.camera.fpsSpeed.toFixed(0)}</b>`
+            : `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b>`;
           this._hudEl.innerHTML =
             `<b>Nuvola</b> 2.5D Viewer<br/>` +
-            `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b><br/>` +
+            camLabel + `<br/>` +
             `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
             streamHtml +
             `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
@@ -733,6 +744,21 @@ class App {
     }
 
     requestAnimationFrame((t) => this._loop(t));
+  }
+
+  _updateClassificationButton() {
+    const btn = document.querySelector('.mode-btns button[data-mode="classification"]');
+    if (!btn) return;
+    const hasClass = this.cloud && this.cloud.hasClassification;
+    btn.disabled = !hasClass;
+    btn.style.opacity = hasClass ? '' : '0.35';
+    btn.style.pointerEvents = hasClass ? '' : 'none';
+    if (!hasClass && this.colorMode === 'classification') {
+      this.colorMode = 'rgb';
+      document.querySelectorAll('.mode-btns button').forEach(b => b.classList.remove('active'));
+      const rgbBtn = document.querySelector('.mode-btns button[data-mode="rgb"]');
+      if (rgbBtn) rgbBtn.classList.add('active');
+    }
   }
 
   dispose() {

@@ -1,18 +1,44 @@
 import { PriorityQueue } from './PriorityQueue.js';
 import * as THREE from 'three';
 
-const _proj = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
-const VIEWPORT_CULL_MARGIN_PX = 40;
+const _box = new THREE.Box3();
 const _tmpVec = new THREE.Vector3();
+const _proj = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+const _corners = new Array(8);
+for (let i = 0; i < 8; i++) _corners[i] = new THREE.Vector3();
+const VIEWPORT_CULL_MARGIN_PX = 40;
+const UNCONDITIONAL_VISIBLE_LEVEL = 2;
+const MIN_PIXEL_ISOMETRIC = 60;
+const MIN_PIXEL_FPS = 80;
 
 export class VisibilitySystem {
   constructor() {
     this.pointBudget = 1000000;
-    this.minimumNodePixelSize = 150;
-    this.maxNodesLoadingPerFrame = 4;
+    this.maxNodesLoadingPerFrame = 8;
     this._queue = new PriorityQueue();
-    this._lastFrame = 0;
     this._numNodesLoading = 0;
+    this._frameCounter = 0;
+
+    this._cacheStale = true;
+    this._cachedResult = null;
+    this._cacheFrameCount = 0;
+    this._projCache = new Map();
+  }
+
+  get numNodesLoading() {
+    return this._numNodesLoading;
+  }
+
+  incrementNodeLoading() {
+    this._numNodesLoading++;
+  }
+
+  decrementNodeLoading() {
+    this._numNodesLoading--;
+  }
+
+  invalidateCache() {
+    this._cacheStale = true;
   }
 
   selectNodes(camera, octreeGeometry, viewportW, viewportH, budget) {
@@ -20,51 +46,175 @@ export class VisibilitySystem {
       return { visibleNodes: [], unloadedNodes: [], numVisiblePoints: 0 };
     }
 
+    if (!this._cacheStale && this._cacheFrameCount < 3) {
+      this._cacheFrameCount++;
+      return this._cachedResult;
+    }
+
+    this._frameCounter++;
     const b = budget != null ? budget : this.pointBudget;
     const root = octreeGeometry.root;
-
     const isFps = camera.activeMode === 'fps';
+
+    if (isFps) {
+      camera.update();
+    }
+
+    if (camera._cloudCenter && !camera._cloudCenter[0]) {
+      const bb = octreeGeometry.boundingBox;
+      camera._cloudCenter = [
+        (bb.min.x + bb.max.x) / 2,
+        (bb.min.y + bb.max.y) / 2,
+        (bb.min.z + bb.max.z) / 2,
+      ];
+    }
 
     this._queue.clear();
     this._queue.push(root, Number.MAX_VALUE);
 
     const visibleNodes = [];
     const unloadedNodes = [];
-    let accumulated = 0;
+    const state = { accumulated: 0 };
 
-    const cp = isFps ? this._extractCameraParamsFPS(camera) : this._extractCameraParams(camera);
+    if (isFps) {
+      this._selectNodesFPS(root, camera, viewportH, b,
+        visibleNodes, unloadedNodes, state);
+    } else {
+      this._selectNodesIsometric(root, camera, viewportW, viewportH, b,
+        visibleNodes, unloadedNodes, state);
+    }
+
+    this._cachedResult = {
+      visibleNodes,
+      unloadedNodes,
+      numVisiblePoints: state.accumulated,
+    };
+    this._cacheStale = false;
+    this._cacheFrameCount = 0;
+
+    return {
+      visibleNodes,
+      unloadedNodes,
+      numVisiblePoints: state.accumulated,
+    };
+  }
+
+  _selectNodesFPS(root, camera, viewportH, budget,
+                   visibleNodes, unloadedNodes, state) {
+    const frustum = camera.getFrustum();
+    const position = camera.getWorldPosition();
+    const fovRad = camera.perspectiveCamera.fov * Math.PI / 180;
+    const minPixel = MIN_PIXEL_FPS;
+    const projNumerator = 0.5 * viewportH / Math.tan(fovRad * 0.5);
 
     while (!this._queue.isEmpty()) {
-      const element = this._queue.pop();
-      const node = element.node;
+      const entry = this._queue.pop();
+      const node = entry.node;
 
-      if (!this._isNodeVisible(node, cp, viewportW, viewportH, isFps)) continue;
+      const bb = node.boundingBox;
+      if (!bb) continue;
 
-      if (accumulated + node.getNumPoints() > b) continue;
+      _box.copy(bb);
+      const inside = frustum.intersectsBox(_box);
+      const nodeLevel = node.getLevel();
 
-      accumulated += node.getNumPoints();
+      if (!inside) continue;
+
+      const np = node.getNumPoints();
+      if (state.accumulated + np > budget) break;
+
+      state.accumulated += np;
       visibleNodes.push(node);
 
-      if (!node.loaded && node.geometry === octreeGeometry) {
-        if (node.byteSize > 0n && node.numPoints > 0) {
-          unloadedNodes.push(node);
-        }
+      if (!node.loaded && !node.loading && node.byteSize > 0n && node.numPoints > 0) {
+        unloadedNodes.push(node);
       }
 
-      if (node.children && node.children.length > 0) {
-        for (const child of node.children) {
-          if (child.numPoints === 0) continue;
-          const size = isFps
-            ? this._computeProjectedNodeFPS(child, cp, viewportW, viewportH)
-            : this._computeProjectedNode(child, cp, viewportW, viewportH).width;
-          if (size < this.minimumNodePixelSize) continue;
-          this._queue.push(child, size);
+      if (!node.children || node.children.length === 0) continue;
+
+      const childLevel = nodeLevel + 1;
+
+      for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        if (child.numPoints === 0) continue;
+
+        const sphere = child.boundingSphere;
+        if (!sphere || sphere.radius <= 0) continue;
+
+        _tmpVec.copy(sphere.center);
+        const dist = position.distanceTo(_tmpVec);
+
+        let weight = Number.MAX_VALUE;
+
+        if (dist > sphere.radius) {
+          const screenPixelRadius = sphere.radius * projNumerator / dist;
+          weight = screenPixelRadius;
+
+          if (screenPixelRadius < minPixel && childLevel > UNCONDITIONAL_VISIBLE_LEVEL) {
+            continue;
+          }
         }
+
+        this._queue.push(child, weight);
       }
     }
 
-    this._lastFrame++;
-    return { visibleNodes, unloadedNodes, numVisiblePoints: accumulated };
+    unloadedNodes.sort((a, b) => {
+      const da = position.distanceTo(a.boundingSphere.center);
+      const db = position.distanceTo(b.boundingSphere.center);
+      return (b.boundingSphere.radius / Math.max(db, 1e-6))
+           - (a.boundingSphere.radius / Math.max(da, 1e-6));
+    });
+  }
+
+  _selectNodesIsometric(root, camera, viewportW, viewportH, budget,
+                         visibleNodes, unloadedNodes, state) {
+    const cp = this._extractCameraParams(camera);
+    const minPixel = MIN_PIXEL_ISOMETRIC;
+    this._projCache.clear();
+
+    while (!this._queue.isEmpty()) {
+      const node = this._queue.pop().node;
+      const nodeLevel = node.getLevel();
+
+      if (!this._isNodeVisibleIsometric(node, cp, viewportW, viewportH)) continue;
+
+      const np = node.getNumPoints();
+      if (state.accumulated + np > budget) break;
+
+      state.accumulated += np;
+      visibleNodes.push(node);
+
+      if (!node.loaded && !node.loading && node.byteSize > 0n && node.numPoints > 0) {
+        unloadedNodes.push(node);
+      }
+
+      if (!node.children || node.children.length === 0) continue;
+
+      const childLevel = nodeLevel + 1;
+
+      for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        if (child.numPoints === 0) continue;
+
+        const projected = this._computeProjectedNodeIsometric(child, cp);
+        const screenSize = Math.max(projected.width, projected.height);
+
+        this._projCache.set(child, screenSize);
+
+        if (screenSize < minPixel && childLevel > UNCONDITIONAL_VISIBLE_LEVEL) {
+          continue;
+        }
+
+        this._queue.push(child, screenSize || minPixel);
+      }
+    }
+
+    unloadedNodes.sort((a, b) => {
+      const sa = this._projCache.get(a) || 0;
+      const sb = this._projCache.get(b) || 0;
+      return sb - sa;
+    });
   }
 
   _extractCameraParams(camera) {
@@ -106,39 +256,30 @@ export class VisibilitySystem {
     return cp;
   }
 
-  _extractCameraParamsFPS(camera) {
-    const fpsCam = camera.fpsCamera;
-    fpsCam.update();
-    const frustum = fpsCam.getFrustum();
-    const position = fpsCam.getWorldPosition();
-    return {
-      frustum,
-      position,
-      isFps: true,
-    };
-  }
-
-  _projectNodeBounds(node, cp, out) {
+  _isNodeVisibleIsometric(node, cp, w, h) {
     const bb = node.boundingBox;
-    if (!bb) return false;
+    if (!bb) return true;
+
+    const cx = bb.min.x, cx1 = bb.max.x;
+    const cy = bb.min.y, cy1 = bb.max.y;
+    const cz = bb.min.z, cz1 = bb.max.z;
+
+    _corners[0].set(cx, cy, cz);
+    _corners[1].set(cx1, cy, cz);
+    _corners[2].set(cx, cy1, cz);
+    _corners[3].set(cx1, cy1, cz);
+    _corners[4].set(cx, cy, cz1);
+    _corners[5].set(cx1, cy, cz1);
+    _corners[6].set(cx, cy1, cz1);
+    _corners[7].set(cx1, cy1, cz1);
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
 
-    const corners = [
-      [bb.min.x, bb.min.y, bb.min.z],
-      [bb.max.x, bb.min.y, bb.min.z],
-      [bb.min.x, bb.max.y, bb.min.z],
-      [bb.max.x, bb.max.y, bb.min.z],
-      [bb.min.x, bb.min.y, bb.max.z],
-      [bb.max.x, bb.min.y, bb.max.z],
-      [bb.min.x, bb.max.y, bb.max.z],
-      [bb.max.x, bb.max.y, bb.max.z],
-    ];
-
     for (let ci = 0; ci < 8; ci++) {
-      let lx = corners[ci][0] - cp.cx;
-      let ly = corners[ci][1] - cp.cy;
-      let lz = corners[ci][2] - cp.cz;
+      const corner = _corners[ci];
+      let lx = corner.x - cp.cx;
+      let ly = corner.y - cp.cy;
+      let lz = corner.z - cp.cz;
 
       if (cp.sinX) {
         const y1 = ly * cp.cosX - lz * cp.sinX;
@@ -162,45 +303,23 @@ export class VisibilitySystem {
       if (sy > maxY) maxY = sy;
     }
 
-    out.minX = minX; out.maxX = maxX; out.minY = minY; out.maxY = maxY;
-    return true;
-  }
-
-  _isNodeVisible(node, cp, w, h, isFps) {
-    if (isFps) {
-      const bb = node.boundingBox;
-      if (!bb) return true;
-      const box = new THREE.Box3(
-        new THREE.Vector3(bb.min.x, bb.min.y, bb.min.z),
-        new THREE.Vector3(bb.max.x, bb.max.y, bb.max.z),
-      );
-      return cp.frustum.intersectsBox(box);
+    if (maxX < -VIEWPORT_CULL_MARGIN_PX || minX > w + VIEWPORT_CULL_MARGIN_PX ||
+        maxY < -VIEWPORT_CULL_MARGIN_PX || minY > h + VIEWPORT_CULL_MARGIN_PX) {
+      return false;
     }
-    if (!this._projectNodeBounds(node, cp, _proj)) return true;
-    const p = _proj;
-    if (p.maxX < -VIEWPORT_CULL_MARGIN_PX || p.minX > w + VIEWPORT_CULL_MARGIN_PX || p.maxY < -VIEWPORT_CULL_MARGIN_PX || p.minY > h + VIEWPORT_CULL_MARGIN_PX) return false;
+
+    _proj.minX = minX; _proj.maxX = maxX;
+    _proj.minY = minY; _proj.maxY = maxY;
     return true;
   }
 
-  _computeProjectedNode(node, cp, w, h) {
-    this._projectNodeBounds(node, cp, _proj);
+  _computeProjectedNodeIsometric(node, cp) {
+    if (!this._isNodeVisibleIsometric(node, cp, Infinity, Infinity)) {
+      return { width: 0, height: 0 };
+    }
     return {
       width: _proj.maxX - _proj.minX,
       height: _proj.maxY - _proj.minY,
-      area: (_proj.maxX - _proj.minX) * (_proj.maxY - _proj.minY),
     };
-  }
-
-  _computeProjectedNodeFPS(node, cp) {
-    const bb = node.boundingBox;
-    if (!bb) return 1000;
-    _tmpVec.set(
-      (bb.min.x + bb.max.x) * 0.5,
-      (bb.min.y + bb.max.y) * 0.5,
-      (bb.min.z + bb.max.z) * 0.5,
-    );
-    const dist = cp.position.distanceTo(_tmpVec);
-    const size = bb.max.x - bb.min.x;
-    return dist > 0 ? (size / dist) * 1000 : 10000;
   }
 }

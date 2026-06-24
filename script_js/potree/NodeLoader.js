@@ -20,7 +20,12 @@ export class NodeLoader {
   }
 
   async loadMetadata(baseUrl) {
-    const url = baseUrl.endsWith('/') ? baseUrl + 'metadata.json' : baseUrl;
+    let url = baseUrl;
+    if (url.endsWith('/')) {
+      url += 'metadata.json';
+    } else if (!url.endsWith('/metadata.json') && !url.endsWith('metadata.json')) {
+      url += '/metadata.json';
+    }
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`Failed to fetch metadata.json: ${resp.statusText}`);
     const json = await resp.json();
@@ -42,6 +47,10 @@ export class NodeLoader {
     const buf = await resp.arrayBuffer();
     const entries = this._parseHierarchyEntries(buf);
     this._totalHierarchyEntries = entries.length;
+
+    let totalPoints = 0;
+    for (const entry of entries) totalPoints += entry.numPoints || 0;
+    geometry.totalPoints = totalPoints;
 
     const hasNames = entries.some(e => e.name);
     const nodes = [];

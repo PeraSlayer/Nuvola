@@ -3,8 +3,15 @@ import { OctreeGeometry } from './PotreeOctree.js';
 import { NodeLoader } from './NodeLoader.js';
 
 export class PotreeLoader {
+  constructor() {
+    this._loader = null;
+  }
+
   async load(url) {
+    if (this._loader) this._loader.dispose();
+
     const loader = new NodeLoader();
+    this._loader = loader;
     const metadata = await loader.loadMetadata(url);
 
     const geometry = new OctreeGeometry();
@@ -56,5 +63,12 @@ export class PotreeLoader {
     await loader.loadHierarchyAll(geometry);
 
     return geometry;
+  }
+
+  dispose() {
+    if (this._loader) {
+      this._loader.dispose();
+      this._loader = null;
+    }
   }
 }

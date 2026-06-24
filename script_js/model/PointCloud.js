@@ -2,8 +2,8 @@ import { collectVisibleLeaves, flattenTree, extractCamParams } from './Octree.js
 import { VisibilitySystem } from '../potree/VisibilitySystem.js';
 import { LRUCache } from '../potree/LRUCache.js';
 
-const MAX_BUDGET = 2000000;
-const MIN_BUDGET = 1000000;
+const MAX_BUDGET = 20000000;
+const MIN_BUDGET = 5000000;
 
 export class PointCloud {
   constructor(data) {
@@ -13,6 +13,7 @@ export class PointCloud {
     this.intensity   = data.intensity;
     this.hasColor    = data.hasColor;
     this.hasIntensity = data.hasIntensity;
+    this.hasClassification = data.hasClassification || false;
 
     if (data.bounds) {
       this.bounds = data.bounds;
@@ -52,7 +53,7 @@ export class PointCloud {
       this._pickCells = data.pickCells || 128;
     }
 
-    this._collectBuf = new Uint32Array(MAX_BUDGET);
+    this._collectBuf = this.octreeGeometry ? null : new Uint32Array(MAX_BUDGET);
     this._leafRefs = [];
     this.renderer = null;
     this._needsRender = false;
@@ -80,7 +81,14 @@ export class PointCloud {
 
   set pointBudget(val) {
     this.visibilitySystem.pointBudget = val;
+    this.visibilitySystem.invalidateCache();
     if (this.lru) this.lru.maxNumPoints = val * 2;
+  }
+
+  consumeNeedsRender() {
+    const v = this._needsRender;
+    this._needsRender = false;
+    return v;
   }
 
   getDrawCall(camera, viewportW, viewportH) {
@@ -137,7 +145,23 @@ export class PointCloud {
 
     this._scheduleNodeLoads(result.unloadedNodes);
 
-    const loadedNodes = result.visibleNodes.filter(n => n.gpuVAO && n.loaded);
+    if (this.lru) {
+      for (let i = 0; i < result.visibleNodes.length; i++) {
+        const node = result.visibleNodes[i];
+        if (node.loaded) this.lru.touch(node);
+      }
+    }
+
+    const loadedNodes = result.visibleNodes;
+    let writeIdx = 0;
+    for (let i = 0; i < loadedNodes.length; i++) {
+      if (loadedNodes[i].gpuVAO && loadedNodes[i].loaded) {
+        if (writeIdx !== i) loadedNodes[writeIdx] = loadedNodes[i];
+        writeIdx++;
+      }
+    }
+    loadedNodes.length = writeIdx;
+
     let total = 0;
     for (let i = 0; i < loadedNodes.length; i++) total += loadedNodes[i].numPoints;
 
@@ -146,7 +170,7 @@ export class PointCloud {
 
   _scheduleNodeLoads(unloadedNodes) {
     if (!this.renderer || !unloadedNodes || unloadedNodes.length === 0) return;
-    const remaining = this.visibilitySystem.maxNodesLoadingPerFrame - this.visibilitySystem._numNodesLoading;
+    const remaining = this.visibilitySystem.maxNodesLoadingPerFrame - this.visibilitySystem.numNodesLoading;
     if (remaining <= 0) return;
 
     const toLoad = Math.min(remaining, unloadedNodes.length);
@@ -157,14 +181,15 @@ export class PointCloud {
       node.onLoad((n) => {
         if (this.renderer) this.renderer.uploadNode(n);
         if (this.lru) this.lru.touch(n);
+        if (this.visibilitySystem) this.visibilitySystem.invalidateCache();
         this._needsRender = true;
       });
 
-      this.visibilitySystem._numNodesLoading++;
+      this.visibilitySystem.incrementNodeLoading();
       node.load().then(() => {
-        this.visibilitySystem._numNodesLoading--;
+        this.visibilitySystem.decrementNodeLoading();
       }).catch((error) => {
-        this.visibilitySystem._numNodesLoading--;
+        this.visibilitySystem.decrementNodeLoading();
         console.warn(`PointCloud: failed to load node ${node.name}:`, error.message);
       });
     }

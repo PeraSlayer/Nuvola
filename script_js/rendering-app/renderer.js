@@ -1,6 +1,8 @@
 import {
   POINT_VERTEX_SHADER,
   POINT_FRAGMENT_SHADER,
+  DEPTH_VERTEX_SHADER,
+  DEPTH_FRAGMENT_SHADER,
   QUAD_VERTEX_SHADER,
   LIGHT_FRAGMENT_SHADER,
 } from './shader.js';
@@ -14,8 +16,8 @@ const COLOR_MODE_VALUE = Object.freeze({
 });
 
 const DEFAULT_LIGHT_DIR = Object.freeze([0.5, 0.5, 1]);
-const BYTES_PER_POINT_GPU = 12 + 3 + 4 + 1; // position(3×4) + color(3) + intensity(4) + classification(1)
-const MAX_DEVICE_PIXEL_RATIO = 2;
+const BYTES_PER_POINT_GPU = 12 + 3 + 4 + 1 + 4; // position(3×4) + color(3) + intensity(4) + classification(1) + opacity(4)
+const MAX_DEVICE_PIXEL_RATIO = 3;
 const DEFAULT_AMBIENT = 0.25;
 const DEFAULT_POINT_SIZE = 3.0;
 
@@ -51,6 +53,18 @@ class UniformGuard {
     this.refs.set(key, new Float32Array(val));
     this.gl.uniform3fv(loc, val);
   }
+
+  uniformMatrix4fv(loc, key, val) {
+    const prev = this.refs.get(key);
+    if (prev && prev.length === 16 && prev[0] === val[0] && prev[1] === val[1] &&
+        prev[2] === val[2] && prev[3] === val[3] && prev[4] === val[4] &&
+        prev[5] === val[5] && prev[6] === val[6] && prev[7] === val[7] &&
+        prev[8] === val[8] && prev[9] === val[9] && prev[10] === val[10] &&
+        prev[11] === val[11] && prev[12] === val[12] && prev[13] === val[13] &&
+        prev[14] === val[14] && prev[15] === val[15]) return;
+    this.refs.set(key, new Float32Array(val));
+    this.gl.uniformMatrix4fv(loc, false, val);
+  }
 }
 
 export class Renderer {
@@ -80,6 +94,9 @@ export class Renderer {
 
     this._benchFrameMs = 0;
     this._contextLost = false;
+
+    this._cloudRotBuf = new Float32Array(3);
+    this._cloudScaleBuf = new Float32Array(3);
 
     this._initShaders();
     this._initBuffers();
@@ -128,6 +145,12 @@ export class Renderer {
     gl.deleteShader(vsPoint);
     gl.deleteShader(fsPoint);
 
+    const vsDepth = this._compile(gl.VERTEX_SHADER, DEPTH_VERTEX_SHADER);
+    const fsDepth = this._compile(gl.FRAGMENT_SHADER, DEPTH_FRAGMENT_SHADER);
+    this.progDepth = this._link(vsDepth, fsDepth);
+    gl.deleteShader(vsDepth);
+    gl.deleteShader(fsDepth);
+
     const vsQuad = this._compile(gl.VERTEX_SHADER, QUAD_VERTEX_SHADER);
     const fsLight = this._compile(gl.FRAGMENT_SHADER, LIGHT_FRAGMENT_SHADER);
     this.progLight = this._link(vsQuad, fsLight);
@@ -155,9 +178,13 @@ export class Renderer {
       cloudScale: gl.getUniformLocation(this.progPoint, 'u_cloudScale'),
       pointSize: gl.getUniformLocation(this.progPoint, 'u_pointSize'),
       pointSizeType: gl.getUniformLocation(this.progPoint, 'u_pointSizeType'),
+      spacing: gl.getUniformLocation(this.progPoint, 'u_spacing'),
       cameraMode: gl.getUniformLocation(this.progPoint, 'u_cameraMode'),
       viewMatrix: gl.getUniformLocation(this.progPoint, 'u_viewMatrix'),
       projMatrix: gl.getUniformLocation(this.progPoint, 'u_projMatrix'),
+      screenWidth: gl.getUniformLocation(this.progPoint, 'u_screenWidth'),
+      screenHeight: gl.getUniformLocation(this.progPoint, 'u_screenHeight'),
+      fov: gl.getUniformLocation(this.progPoint, 'u_fov'),
     };
 
     this.uLight = {
@@ -175,6 +202,21 @@ export class Renderer {
     this.attrCol = gl.getAttribLocation(this.progPoint, 'a_color');
     this.attrInt = gl.getAttribLocation(this.progPoint, 'a_intensity');
     this.attrClass = gl.getAttribLocation(this.progPoint, 'a_classification');
+    this.attrOpacity = gl.getAttribLocation(this.progPoint, 'a_opacity');
+
+    this.uDepth = {
+      resolution: gl.getUniformLocation(this.progDepth, 'u_resolution'),
+      pan: gl.getUniformLocation(this.progDepth, 'u_pan'),
+      zoom: gl.getUniformLocation(this.progDepth, 'u_zoom'),
+      rot: gl.getUniformLocation(this.progDepth, 'u_rot'),
+      rotX: gl.getUniformLocation(this.progDepth, 'u_rotX'),
+      rotY: gl.getUniformLocation(this.progDepth, 'u_rotY'),
+      center: gl.getUniformLocation(this.progDepth, 'u_center'),
+      cameraMode: gl.getUniformLocation(this.progDepth, 'u_cameraMode'),
+      viewMatrix: gl.getUniformLocation(this.progDepth, 'u_viewMatrix'),
+      projMatrix: gl.getUniformLocation(this.progDepth, 'u_projMatrix'),
+    };
+    this._depthUniforms = new UniformGuard(gl);
   }
 
   _initBuffers() {
@@ -182,6 +224,8 @@ export class Renderer {
     this.vboPos = this._requireResource(gl.createBuffer(), 'position buffer');
     this.vboCol = this._requireResource(gl.createBuffer(), 'color buffer');
     this.vboInt = this._requireResource(gl.createBuffer(), 'intensity buffer');
+    this.vboClass = this._requireResource(gl.createBuffer(), 'classification buffer');
+    this.vboOpacity = this._requireResource(gl.createBuffer(), 'opacity buffer');
     this._quadVao = this._requireResource(gl.createVertexArray(), 'quad VAO');
   }
 
@@ -246,13 +290,17 @@ export class Renderer {
 
   _ensureResources() {
     this._contextLost = false;
-    if (this.progPoint && this.progLight) return;
+    if (this.progPoint && this.progDepth && this.progLight) return;
     this._initShaders();
     this._initBuffers();
     this._initFBO();
     if (this.width > 0 && this.height > 0) {
       this._setupFBO(this.width, this.height);
     }
+  }
+
+  restoreGPUState() {
+    this._ensureResources();
   }
 
   uploadPointCloud(cloud) {
@@ -271,6 +319,16 @@ export class Renderer {
     if (cloud.intensity) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.vboInt);
       gl.bufferData(gl.ARRAY_BUFFER, cloud.intensity, gl.STATIC_DRAW);
+    }
+
+    if (cloud.classification) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vboClass);
+      gl.bufferData(gl.ARRAY_BUFFER, cloud.classification, gl.STATIC_DRAW);
+    }
+
+    if (cloud.opacity) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vboOpacity);
+      gl.bufferData(gl.ARRAY_BUFFER, cloud.opacity, gl.STATIC_DRAW);
     }
 
     this._gpuBytes = cloud.getGPUByteSize();
@@ -347,6 +405,17 @@ export class Renderer {
     gl.enableVertexAttribArray(this.attrClass);
     gl.vertexAttribPointer(this.attrClass, 1, gl.UNSIGNED_BYTE, false, 0, 0);
 
+    let opacityData = gd.opacity;
+    if (!opacityData) {
+      opacityData = new Float32Array(numPoints);
+      opacityData.fill(1.0);
+    }
+    const vboOpacity = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vboOpacity);
+    gl.bufferData(gl.ARRAY_BUFFER, opacityData, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this.attrOpacity);
+    gl.vertexAttribPointer(this.attrOpacity, 1, gl.FLOAT, false, 0, 0);
+
     gl.bindVertexArray(null);
 
     node.gpuVAO = vao;
@@ -354,10 +423,15 @@ export class Renderer {
     node._gpuVboCol = vboCol;
     node._gpuVboInt = vboInt;
     node._gpuVboClass = vboClass;
+    node._gpuVboOpacity = vboOpacity;
 
     node.onDispose((n) => this.removeNode(n));
 
-    this._gpuBytes += numPoints * BYTES_PER_POINT_GPU;
+    node.numPoints = numPoints;
+
+    const gpuBytes = numPoints * BYTES_PER_POINT_GPU;
+    node._gpuBytes = gpuBytes;
+    this._gpuBytes += gpuBytes;
   }
 
   removeNode(node) {
@@ -367,8 +441,10 @@ export class Renderer {
     if (node._gpuVboCol) { gl.deleteBuffer(node._gpuVboCol); node._gpuVboCol = null; }
     if (node._gpuVboInt) { gl.deleteBuffer(node._gpuVboInt); node._gpuVboInt = null; }
     if (node._gpuVboClass) { gl.deleteBuffer(node._gpuVboClass); node._gpuVboClass = null; }
-    const numPoints = node.numPoints || 0;
-    this._gpuBytes -= numPoints * BYTES_PER_POINT_GPU;
+    if (node._gpuVboOpacity) { gl.deleteBuffer(node._gpuVboOpacity); node._gpuVboOpacity = null; }
+    const gpuBytes = node._gpuBytes || 0;
+    this._gpuBytes -= gpuBytes;
+    node._gpuBytes = 0;
     if (this._gpuBytes < 0) this._gpuBytes = 0;
   }
 
@@ -381,6 +457,8 @@ export class Renderer {
     if (this.vboPos)  { gl.deleteBuffer(this.vboPos);  this.vboPos = null; }
     if (this.vboCol)  { gl.deleteBuffer(this.vboCol);  this.vboCol = null; }
     if (this.vboInt)  { gl.deleteBuffer(this.vboInt);  this.vboInt = null; }
+    if (this.vboClass) { gl.deleteBuffer(this.vboClass); this.vboClass = null; }
+    if (this.vboOpacity) { gl.deleteBuffer(this.vboOpacity); this.vboOpacity = null; }
     if (this._quadVao) { gl.deleteVertexArray(this._quadVao); this._quadVao = null; }
 
     if (this.fbo)      { gl.deleteFramebuffer(this.fbo);    this.fbo = null; }
@@ -389,6 +467,7 @@ export class Renderer {
     if (this._depthRB) { gl.deleteRenderbuffer(this._depthRB); this._depthRB = null; }
 
     if (this.progPoint) { gl.deleteProgram(this.progPoint); this.progPoint = null; }
+    if (this.progDepth) { gl.deleteProgram(this.progDepth); this.progDepth = null; }
     if (this.progLight) { gl.deleteProgram(this.progLight); this.progLight = null; }
 
     this._cloud = null;
@@ -435,6 +514,24 @@ export class Renderer {
       gl.vertexAttrib1f(this.attrInt, 0.5);
     }
 
+    if (cloud.classification && this.attrClass >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vboClass);
+      gl.enableVertexAttribArray(this.attrClass);
+      gl.vertexAttribPointer(this.attrClass, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+    } else if (this.attrClass >= 0) {
+      gl.disableVertexAttribArray(this.attrClass);
+      gl.vertexAttrib1f(this.attrClass, 0.0);
+    }
+
+    if (cloud.opacity && this.attrOpacity >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vboOpacity);
+      gl.enableVertexAttribArray(this.attrOpacity);
+      gl.vertexAttribPointer(this.attrOpacity, 1, gl.FLOAT, false, 0, 0);
+    } else if (this.attrOpacity >= 0) {
+      gl.disableVertexAttribArray(this.attrOpacity);
+      gl.vertexAttrib1f(this.attrOpacity, 1.0);
+    }
+
     if (indexBuffer) gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
 
     return vao;
@@ -477,9 +574,41 @@ export class Renderer {
 
     const cameraMode = u.u_cameraMode || 0;
     apply.uniform1i(up.cameraMode, 'point.cameraMode', cameraMode);
+
+    apply.uniform1f(up.screenWidth, 'point.screenWidth', this.width);
+    apply.uniform1f(up.screenHeight, 'point.screenHeight', this.height);
+
+    const fov = camera.activeMode === 'fps'
+      ? (camera.perspectiveCamera.fov * Math.PI / 180) : 1.0;
+    apply.uniform1f(up.fov, 'point.fov', fov);
+
+    const spacing = u.u_spacing != null ? u.u_spacing : 1.0;
+    apply.uniform1f(up.spacing, 'point.spacing', spacing);
+
     if (cameraMode === 1 && u.u_viewMatrix && u.u_projMatrix) {
-      this.gl.uniformMatrix4fv(up.viewMatrix, false, u.u_viewMatrix);
-      this.gl.uniformMatrix4fv(up.projMatrix, false, u.u_projMatrix);
+      apply.uniformMatrix4fv(up.viewMatrix, 'point.viewMatrix', u.u_viewMatrix);
+      apply.uniformMatrix4fv(up.projMatrix, 'point.projMatrix', u.u_projMatrix);
+    }
+  }
+
+  _applyDepthUniforms(camera, cloud) {
+    const u = camera.getUniforms(this.width, this.height, cloud);
+    const apply = this._depthUniforms;
+    const ud = this.uDepth;
+    const cameraMode = u.u_cameraMode || 0;
+
+    apply.uniform2fv(ud.resolution, 'depth.resolution', u.u_resolution);
+    apply.uniform2fv(ud.pan, 'depth.pan', u.u_pan);
+    apply.uniform1f(ud.zoom, 'depth.zoom', u.u_zoom);
+    apply.uniform1f(ud.rot, 'depth.rot', u.u_rot);
+    apply.uniform1f(ud.rotX, 'depth.rotX', u.u_rotX);
+    apply.uniform1f(ud.rotY, 'depth.rotY', u.u_rotY);
+    apply.uniform3fv(ud.center, 'depth.center', u.u_center);
+    apply.uniform1i(ud.cameraMode, 'depth.cameraMode', cameraMode);
+
+    if (cameraMode === 1 && u.u_viewMatrix && u.u_projMatrix) {
+      apply.uniformMatrix4fv(ud.viewMatrix, 'depth.viewMatrix', u.u_viewMatrix);
+      apply.uniformMatrix4fv(ud.projMatrix, 'depth.projMatrix', u.u_projMatrix);
     }
   }
 
@@ -508,24 +637,13 @@ export class Renderer {
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    gl.useProgram(this.progPoint);
-
-    this._applyCameraUniforms(camera, cloud);
-    this._pointUniforms.uniform1i(this.uPoint.colorMode, 'point.colorMode', modeVal);
-
     const pointSize = opts.pointSize != null ? opts.pointSize : DEFAULT_POINT_SIZE;
     const pointSizeType = opts.pointSizeType != null ? opts.pointSizeType : 1;
-    this._pointUniforms.uniform1f(this.uPoint.pointSize, 'point.pointSize', pointSize);
-    this._pointUniforms.uniform1i(this.uPoint.pointSizeType, 'point.pointSizeType', pointSizeType);
-
-    const useCloudTransform = opts.useCloudTransform ? 1 : 0;
-    gl.uniform1i(this.uPoint.useCloudTransform, useCloudTransform);
-    if (useCloudTransform) {
-      gl.uniform3fv(this.uPoint.cloudRot, new Float32Array(opts.cloudRot || [0, 0, 0]));
-      gl.uniform3fv(this.uPoint.cloudScale, new Float32Array(opts.cloudScale || [1, 1, 1]));
-    }
 
     if (hasPoints) {
+      gl.useProgram(this.progDepth);
+      this._applyDepthUniforms(camera, cloud);
+
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
       gl.depthMask(true);
@@ -555,16 +673,37 @@ export class Renderer {
         gl.drawArrays(gl.POINTS, 0, drawCount);
       }
 
+      gl.useProgram(this.progPoint);
+
+      this._applyCameraUniforms(camera, cloud);
+      this._pointUniforms.uniform1i(this.uPoint.colorMode, 'point.colorMode', modeVal);
+      this._pointUniforms.uniform1f(this.uPoint.pointSize, 'point.pointSize', pointSize);
+      this._pointUniforms.uniform1i(this.uPoint.pointSizeType, 'point.pointSizeType', pointSizeType);
+
+      const useCloudTransform = opts.useCloudTransform ? 1 : 0;
+      this._pointUniforms.uniform1i(this.uPoint.useCloudTransform, 'point.useCloudTransform', useCloudTransform);
+      if (useCloudTransform) {
+        const rot = opts.cloudRot || [0, 0, 0];
+        const scale = opts.cloudScale || [1, 1, 1];
+        this._cloudRotBuf[0] = rot[0]; this._cloudRotBuf[1] = rot[1]; this._cloudRotBuf[2] = rot[2];
+        this._cloudScaleBuf[0] = scale[0]; this._cloudScaleBuf[1] = scale[1]; this._cloudScaleBuf[2] = scale[2];
+        this._pointUniforms.uniform3fv(this.uPoint.cloudRot, 'point.cloudRot', this._cloudRotBuf);
+        this._pointUniforms.uniform3fv(this.uPoint.cloudScale, 'point.cloudScale', this._cloudScaleBuf);
+      }
+
       gl.colorMask(true, true, true, true);
       gl.depthMask(false);
-      gl.depthFunc(gl.LEQUAL);
-      gl.disable(gl.BLEND);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
       if (nodes) {
         for (let i = 0; i < nodes.length; i++) {
           const node = nodes[i];
           if (!node.gpuVAO) continue;
           gl.bindVertexArray(node.gpuVAO);
+          if (node.spacing > 0) {
+            this._pointUniforms.uniform1f(this.uPoint.spacing, 'point.nodeSpacing', node.spacing);
+          }
           gl.drawArrays(gl.POINTS, 0, node.numPoints);
         }
       } else if (hasIndices) {
@@ -573,7 +712,7 @@ export class Renderer {
         gl.drawArrays(gl.POINTS, 0, drawCount);
       }
 
-      gl.depthFunc(gl.LEQUAL);
+      gl.disable(gl.BLEND);
       gl.depthMask(true);
     }
 

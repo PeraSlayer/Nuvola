@@ -12,18 +12,25 @@ Exporta la classe Camera usata da renderer, main, minimap, misure e gizmo.
 ===============================================================================
 */
 
-function _depthRange(cloud, angle) {
+function _depthRange(cloud, angle, corners) {
   if (!cloud || !cloud.bounds) return { min: 0, max: 1 };
   const b = cloud.bounds;
   const cx = cloud.center[0], cy = cloud.center[1], cz = cloud.center[2];
   const c = Math.cos(angle), s = Math.sin(angle);
   const cx0 = b.min[0], cx1 = b.max[0], cy0 = b.min[1], cy1 = b.max[1], cz0 = b.min[2], cz1 = b.max[2];
+
+  corners[0][0] = cx0; corners[0][1] = cy0; corners[0][2] = cz0;
+  corners[1][0] = cx1; corners[1][1] = cy0; corners[1][2] = cz0;
+  corners[2][0] = cx0; corners[2][1] = cy1; corners[2][2] = cz0;
+  corners[3][0] = cx1; corners[3][1] = cy1; corners[3][2] = cz0;
+  corners[4][0] = cx0; corners[4][1] = cy0; corners[4][2] = cz1;
+  corners[5][0] = cx1; corners[5][1] = cy0; corners[5][2] = cz1;
+  corners[6][0] = cx0; corners[6][1] = cy1; corners[6][2] = cz1;
+  corners[7][0] = cx1; corners[7][1] = cy1; corners[7][2] = cz1;
+
   let minD = Infinity, maxD = -Infinity;
-  for (const corner of [
-    [cx0, cy0, cz0], [cx1, cy0, cz0], [cx0, cy1, cz0], [cx1, cy1, cz0],
-    [cx0, cy0, cz1], [cx1, cy0, cz1], [cx0, cy1, cz1], [cx1, cy1, cz1],
-  ]) {
-    const lx = corner[0] - cx, ly = corner[1] - cy, lz = corner[2] - cz;
+  for (let i = 0; i < 8; i++) {
+    const lx = corners[i][0] - cx, ly = corners[i][1] - cy, lz = corners[i][2] - cz;
     const rx = lx * c - ly * s;
     const ry = lx * s + ly * c;
     const d = rx + ry - lz;
@@ -31,6 +38,20 @@ function _depthRange(cloud, angle) {
     if (d > maxD) maxD = d;
   }
   return { min: minD, max: minD === maxD ? maxD + 1 : maxD };
+}
+
+function _spacing(cloud) {
+  if (!cloud) return 1;
+  if (cloud.octreeGeometry && cloud.octreeGeometry.spacing > 0)
+    return cloud.octreeGeometry.spacing;
+  if (cloud.count && cloud.bounds) {
+    const dx = cloud.bounds.max[0] - cloud.bounds.min[0];
+    const dy = cloud.bounds.max[1] - cloud.bounds.min[1];
+    const dz = cloud.bounds.max[2] - cloud.bounds.min[2];
+    const vol = Math.max(dx * dy * dz, 1e-6);
+    return Math.cbrt(vol / cloud.count);
+  }
+  return 1;
 }
 
 export class Camera {
@@ -54,6 +75,11 @@ export class Camera {
     this._depthMin = 0;
     this._depthMax = 1;
 
+    this._depthCorners = [
+      [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+      [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+    ];
+
     // Pre-allocated arrays for getUniforms (reused each frame, avoids allocation)
     this._uRes = new Float32Array(2);
     this._uPan = new Float32Array(2);
@@ -75,7 +101,8 @@ export class Camera {
     const hasIntensity = cloud && cloud.hasIntensity;
     const iMin = hasIntensity ? cloud.intensityMin : 0;
     const iMax = hasIntensity ? cloud.intensityMax : 1;
-    const dr = _depthRange(cloud, this._rotAngle);
+    const dr = _depthRange(cloud, this._rotAngle, this._depthCorners);
+    const spacing = _spacing(cloud);
     this._uRes[0] = w; this._uRes[1] = h;
     this._uPan[0] = this.panX; this._uPan[1] = this.panY;
     this._uCenter[0] = center[0]; this._uCenter[1] = center[1]; this._uCenter[2] = center[2];
@@ -94,6 +121,8 @@ export class Camera {
       u_depthMax: dr.max,
       u_iMin: iMin,
       u_iMax: iMax,
+      u_spacing: spacing,
+      u_cameraMode: 0,
     };
   }
 
@@ -138,7 +167,7 @@ export class Camera {
     this._defaultZoom = this.zoom;
     this.panX = w * 0.5 - (minSx + maxSx) * 0.5 * this.zoom;
     this.panY = h * 0.5 - (minSy + maxSy) * 0.5 * this.zoom;
-    const dr = _depthRange(cloud, angle);
+    const dr = _depthRange(cloud, angle, this._depthCorners);
     this._depthMin = dr.min;
     this._depthMax = dr.max;
   }
@@ -166,7 +195,11 @@ export class Camera {
   }
 
   static depthRange(cloud, angle) {
-    return _depthRange(cloud, angle);
+    const corners = [
+      [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+      [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+    ];
+    return _depthRange(cloud, angle, corners);
   }
 
   zoomAt(factor, sx, sy, w, h) {

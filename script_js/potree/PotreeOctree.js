@@ -122,6 +122,7 @@ export class OctreeGeometry {
     this.offset = new THREE.Vector3();
     this.projection = null;
     this.numNodes = 0;
+    this.totalPoints = 0;
     this.loader = null;
     this.attributes = [];
     this.url = '';
