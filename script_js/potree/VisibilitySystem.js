@@ -70,43 +70,88 @@ export class VisibilitySystem {
       ];
     }
 
-    this._queue.clear();
-    this._queue.push(root, Number.MAX_VALUE);
-
-    const visibleNodes = [];
-    const unloadedNodes = [];
-    const state = { accumulated: 0 };
-
-    if (isFps) {
-      this._selectNodesFPS(root, camera, viewportH, b,
-        visibleNodes, unloadedNodes, state);
-    } else {
-      this._selectNodesIsometric(root, camera, viewportW, viewportH, b,
-        visibleNodes, unloadedNodes, state);
-    }
+    const result = isFps
+      ? this.collectFPSNodes(root, camera, viewportH, b)
+      : this.collectOverviewNodes(root, camera, b);
 
     this._cachedResult = {
-      visibleNodes,
-      unloadedNodes,
-      numVisiblePoints: state.accumulated,
+      visibleNodes: result.visibleNodes,
+      unloadedNodes: result.unloadedNodes,
+      numVisiblePoints: result.numVisiblePoints,
     };
     this._cacheStale = false;
     this._cacheFrameCount = 0;
 
-    return {
-      visibleNodes,
-      unloadedNodes,
-      numVisiblePoints: state.accumulated,
-    };
+    return result;
   }
 
-  _selectNodesFPS(root, camera, viewportH, budget,
-                   visibleNodes, unloadedNodes, state) {
+  collectOverviewNodes(root, camera, budget) {
+    const cp = this._extractCameraParams(camera);
+    const minPixel = MIN_PIXEL_ISOMETRIC;
+    const visibleNodes = [];
+    const unloadedNodes = [];
+    let accumulated = 0;
+
+    this._queue.clear();
+    this._projCache.clear();
+    this._queue.push(root, Number.MAX_VALUE);
+
+    while (!this._queue.isEmpty()) {
+      const node = this._queue.pop().node;
+      const np = node.getNumPoints();
+      if (np === 0) continue;
+
+      const projected = this._computeProjectedNodeIsometric(node, cp);
+      const screenSize = Math.max(projected.width, projected.height);
+
+      if (screenSize >= minPixel && node.hasChildren) {
+        if (!node.children || node.children.length === 0) {
+          node.loadChildren();
+        }
+        if (node.children && node.children.length > 0) {
+          for (let i = 0; i < node.children.length; i++) {
+            const child = node.children[i];
+            if (child.numPoints === 0) continue;
+            const childProjected = this._computeProjectedNodeIsometric(child, cp);
+            const childScreenSize = Math.max(childProjected.width, childProjected.height);
+            this._projCache.set(child, childScreenSize);
+            this._queue.push(child, childScreenSize || minPixel);
+          }
+          continue;
+        }
+      }
+
+      if (accumulated + np > budget) break;
+      accumulated += np;
+      visibleNodes.push(node);
+
+      if (!node.loaded && !node.loading && node.byteSize > 0n && node.numPoints > 0) {
+        unloadedNodes.push(node);
+      }
+    }
+
+    unloadedNodes.sort((a, b) => {
+      const sa = this._projCache.get(a) || minPixel;
+      const sb = this._projCache.get(b) || minPixel;
+      return sb - sa;
+    });
+
+    return { visibleNodes, unloadedNodes, numVisiblePoints: accumulated };
+  }
+
+  collectFPSNodes(root, camera, viewportH, budget) {
     const frustum = camera.getFrustum();
     const position = camera.getWorldPosition();
     const fovRad = camera.perspectiveCamera.fov * Math.PI / 180;
     const minPixel = MIN_PIXEL_FPS;
     const projNumerator = 0.5 * viewportH / Math.tan(fovRad * 0.5);
+
+    const visibleNodes = [];
+    const unloadedNodes = [];
+    let accumulated = 0;
+
+    this._queue.clear();
+    this._queue.push(root, Number.MAX_VALUE);
 
     while (!this._queue.isEmpty()) {
       const entry = this._queue.pop();
@@ -116,28 +161,25 @@ export class VisibilitySystem {
       if (!bb) continue;
 
       _box.copy(bb);
-      const inside = frustum.intersectsBox(_box);
-      const nodeLevel = node.getLevel();
-
-      if (!inside) continue;
+      if (!frustum.intersectsBox(_box)) continue;
 
       const np = node.getNumPoints();
-      if (state.accumulated + np > budget) break;
+      if (accumulated + np > budget) break;
 
-      state.accumulated += np;
+      accumulated += np;
       visibleNodes.push(node);
 
       if (!node.loaded && !node.loading && node.byteSize > 0n && node.numPoints > 0) {
         unloadedNodes.push(node);
       }
 
-      if (node.hasChildren > 0 && (!node.children || node.children.length === 0)) {
+      if (node.hasChildren && (!node.children || node.children.length === 0)) {
         node.loadChildren();
       }
 
       if (!node.children || node.children.length === 0) continue;
 
-      const childLevel = nodeLevel + 1;
+      const nodeLevel = node.getLevel();
 
       for (let i = 0; i < node.children.length; i++) {
         const child = node.children[i];
@@ -151,18 +193,17 @@ export class VisibilitySystem {
 
         if (dist > this.maxVisibleDistance) continue;
 
-        let weight = Number.MAX_VALUE;
-
         if (dist > sphere.radius) {
           const screenPixelRadius = sphere.radius * projNumerator / dist;
-          weight = screenPixelRadius;
 
-          if (screenPixelRadius < minPixel && childLevel > UNCONDITIONAL_VISIBLE_LEVEL) {
+          if (screenPixelRadius < minPixel && child.getLevel() > UNCONDITIONAL_VISIBLE_LEVEL) {
             continue;
           }
-        }
 
-        this._queue.push(child, weight);
+          this._queue.push(child, screenPixelRadius);
+        } else {
+          this._queue.push(child, Number.MAX_VALUE);
+        }
       }
     }
 
@@ -172,72 +213,8 @@ export class VisibilitySystem {
       return (b.boundingSphere.radius / Math.max(db, 1e-6))
            - (a.boundingSphere.radius / Math.max(da, 1e-6));
     });
-  }
 
-  _selectNodesIsometric(root, camera, viewportW, viewportH, budget,
-                         visibleNodes, unloadedNodes, state) {
-    const cp = this._extractCameraParams(camera);
-    const minPixel = MIN_PIXEL_ISOMETRIC;
-    this._projCache.clear();
-
-    while (!this._queue.isEmpty()) {
-      const node = this._queue.pop().node;
-      const nodeLevel = node.getLevel();
-
-      if (!this._isNodeVisibleIsometric(node, cp, viewportW, viewportH)) continue;
-
-      const np = node.getNumPoints();
-      if (state.accumulated + np > budget) break;
-
-      state.accumulated += np;
-      visibleNodes.push(node);
-
-      if (!node.loaded && !node.loading && node.byteSize > 0n && node.numPoints > 0) {
-        unloadedNodes.push(node);
-      }
-
-      if (node.hasChildren > 0 && (!node.children || node.children.length === 0)) {
-        node.loadChildren();
-      }
-
-      if (!node.children || node.children.length === 0) continue;
-
-      const childLevel = nodeLevel + 1;
-      const maxDistSq = this.maxVisibleDistance * this.maxVisibleDistance;
-
-      for (let i = 0; i < node.children.length; i++) {
-        const child = node.children[i];
-        if (child.numPoints === 0) continue;
-
-        if (this.maxVisibleDistance < Infinity) {
-          const bb = child.boundingBox;
-          if (bb) {
-            const cx = (bb.min.x + bb.max.x) * 0.5;
-            const cy = (bb.min.y + bb.max.y) * 0.5;
-            const cz = (bb.min.z + bb.max.z) * 0.5;
-            const dx = cx - cp.cx, dy = cy - cp.cy, dz = cz - cp.cz;
-            if (dx * dx + dy * dy + dz * dz > maxDistSq) continue;
-          }
-        }
-
-        const projected = this._computeProjectedNodeIsometric(child, cp);
-        const screenSize = Math.max(projected.width, projected.height);
-
-        this._projCache.set(child, screenSize);
-
-        if (screenSize < minPixel && childLevel > UNCONDITIONAL_VISIBLE_LEVEL) {
-          continue;
-        }
-
-        this._queue.push(child, screenSize || minPixel);
-      }
-    }
-
-    unloadedNodes.sort((a, b) => {
-      const sa = this._projCache.get(a) || 0;
-      const sb = this._projCache.get(b) || 0;
-      return sb - sa;
-    });
+    return { visibleNodes, unloadedNodes, numVisiblePoints: accumulated };
   }
 
   _extractCameraParams(camera) {
