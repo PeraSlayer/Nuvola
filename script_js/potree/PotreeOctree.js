@@ -96,6 +96,7 @@ export class OctreeGeometryNode {
       handler(this);
     }
     this._oneTimeDisposeHandlers.length = 0;
+    this.geometryData = null;
     this._disposed = true;
   }
 
