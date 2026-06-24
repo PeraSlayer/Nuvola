@@ -29,6 +29,7 @@ import { CameraController } from '../potree/CameraController.js';
 import { CloudTransform }  from '../model/transform.js';
 import { Gizmo }           from '../view/gizmo.js';
 import { Renderer }        from '../rendering-app/renderer.js';
+
 import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
 import { UIController }    from '../view/ui-controller.js';
@@ -161,7 +162,8 @@ class App {
     this.enableRangeDecimation = true;
     this.minPointsForDetail = 50000;
     this.maxDistanceRatio = 1.0;
-    this._pointBudget = 5000000;
+    this._pointBudget = 200000;
+    this._autoScaleBudget = true;
     this.pointSize = 3.0;
     this.pointSizeType = 1;
 
@@ -240,8 +242,9 @@ class App {
     } else {
       this.camera.fitToBounds(this.cloud || { bounds: {min:[0,0,0],max:[1,1,1]}, center:[0,0,0] }, w, h);
     }
-    document.getElementById('zoom-slider').value = this.camera.zoom;
-    document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
+      document.getElementById('zoom-slider').value = this.camera.zoom;
+      document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
+      this._updateBudgetSlider();
     this.camera.markDirty();
   }
 
@@ -413,7 +416,17 @@ class App {
 
       this.cloud = new PointCloud(data);
       this.cloud.renderer = this.renderer;
-      this.cloud.pointBudget = this._pointBudget;
+      const autoBudget = this._autoScaleBudget
+        ? Math.floor(this.renderer.batchCapacity * 0.4)
+        : this._pointBudget;
+      this.cloud.pointBudget = autoBudget;
+      if (data.bounds) {
+        const dx = data.bounds.max[0] - data.bounds.min[0];
+        const dy = data.bounds.max[1] - data.bounds.min[1];
+        const dz = data.bounds.max[2] - data.bounds.min[2];
+        const diag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        this.cloud.maxVisibleDistance = Math.max(diag * 0.3, 50);
+      }
 
       this.camera.setRefCenter(this.cloud.center);
       this._fitView();
@@ -585,6 +598,19 @@ class App {
 
       this.renderer.uploadPointCloud(this.cloud);
       this.camera.setRefCenter(this.cloud.center);
+      if (this.cloud.octreeGeometry) {
+        const autoBudget = this._autoScaleBudget
+          ? Math.floor(this.renderer.batchCapacity * 0.4)
+          : this._pointBudget;
+        this.cloud.pointBudget = autoBudget;
+        if (this.cloud.bounds) {
+          const dx = this.cloud.bounds.max[0] - this.cloud.bounds.min[0];
+          const dy = this.cloud.bounds.max[1] - this.cloud.bounds.min[1];
+          const dz = this.cloud.bounds.max[2] - this.cloud.bounds.min[2];
+          const diag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          this.cloud.maxVisibleDistance = Math.max(diag * 0.3, 50);
+        }
+      }
       this._fitView();
       this.renderer.render(this.camera, this.cloud, {
         colorMode: this.colorMode,
@@ -606,6 +632,7 @@ class App {
         `${file.name}<br/>${this.cloud.count.toLocaleString()} points<br/>${format}<br/>` +
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
         (this.cloud.hasIntensity ? 'Intensity ✓' : '');
+      this._updateBudgetSlider();
       this._updateClassificationButton();
 
     } catch (err) {
@@ -728,6 +755,11 @@ class App {
             if (loading > 0) streamHtml += `, <b>${loading}</b> loading`;
             streamHtml += '</span><br/>';
           }
+          let batchHtml = '';
+          if (this.renderer.batchCapacity) {
+            const capK = Math.floor(this.renderer.batchCapacity / 1000);
+            batchHtml = `<span style="font-size:0.65rem;color:#3fb950">GPU: ${capK}k batch capacity</span><br/>`;
+          }
           const camLabel = this.camera.activeMode === 'fps'
             ? `Drone · Speed: <b>${this.camera.fpsSpeed.toFixed(0)}</b>`
             : `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b>`;
@@ -736,6 +768,8 @@ class App {
             camLabel + `<br/>` +
             `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
             streamHtml +
+            batchHtml +
+            threeHtml +
             `<span style="font-size:0.65rem;color:#8b949e">LOD: <b>${bench.frameMs.toFixed(1)}</b>ms</span>`;
         }
       }
@@ -787,6 +821,17 @@ class App {
       this._potreeLoader.dispose();
       this._potreeLoader = null;
     }
+  }
+
+  _updateBudgetSlider() {
+    const budget = this.cloud ? this.cloud.visibilitySystem.pointBudget : this._pointBudget;
+    const slider = document.getElementById('point-budget');
+    const val = document.getElementById('point-budget-val');
+    const autoChk = document.getElementById('chk-auto-budget');
+    slider.value = budget;
+    const label = budget >= 1e6 ? (budget / 1e6).toFixed(1) + 'M' : Math.floor(budget / 1000) + 'k';
+    val.textContent = label;
+    if (autoChk) autoChk.checked = this._autoScaleBudget;
   }
 }
 

@@ -163,10 +163,32 @@ export class UIController {
     $('max-dist-ratio').oninput = (e) => { a.maxDistanceRatio = +e.target.value; $('max-dist-ratio-val').textContent = a.maxDistanceRatio.toFixed(2); a.camera.markDirty(); };
 
     // --- Point Budget (Potree LOD) -----------------------------------------
+    $('chk-auto-budget').onchange = (e) => {
+      a._autoScaleBudget = e.target.checked;
+      if (a.cloud) {
+        const autoBudget = a._autoScaleBudget
+          ? Math.floor(a.renderer.batchCapacity * 0.4)
+          : a._pointBudget;
+        a.cloud.pointBudget = autoBudget;
+      }
+      a.camera.markDirty();
+    };
     $('point-budget').oninput = (e) => {
       const val = +e.target.value;
-      a.pointBudget = val;
-      $('point-budget-val').textContent = (val / 1e6).toFixed(1) + 'M';
+      a._pointBudget = val;
+      $('chk-auto-budget').checked = false;
+      a._autoScaleBudget = false;
+      if (a.cloud) a.cloud.pointBudget = val;
+      const label = val >= 1e6 ? (val / 1e6).toFixed(1) + 'M' : (val / 1000).toFixed(0) + 'k';
+      $('point-budget-val').textContent = label;
+      a.camera.markDirty();
+    };
+    $('max-visible-dist').oninput = (e) => {
+      const val = +e.target.value;
+      if (a.cloud) {
+        a.cloud.maxVisibleDistance = val >= 4999 ? Infinity : val;
+      }
+      $('max-visible-dist-val').textContent = val >= 4999 ? '∞' : val + 'm';
       a.camera.markDirty();
     };
 

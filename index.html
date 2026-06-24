@@ -81,8 +81,11 @@
     </div>
 
     <div class="panel" id="budget-panel">
-      <h2>Point Budget (Potree)</h2>
-      <div class="row"><label>Max Points</label><input type="range" id="point-budget" min="100000" max="25000000" step="250000" value="5000000" /><span class="val" id="point-budget-val">5.0M</span></div>
+      <h2>LOD &amp; Budget</h2>
+      <label><input type="checkbox" id="chk-auto-budget" checked /> Auto-scale budget (GPU VRAM)</label>
+      <div class="row mt-1"><label>Point Budget</label><input type="range" id="point-budget" min="10000" max="10000000" step="10000" value="200000" /><span class="val" id="point-budget-val">200k</span></div>
+      <div class="row"><label>Max Distance</label><input type="range" id="max-visible-dist" min="50" max="5000" step="50" value="500" /><span class="val" id="max-visible-dist-val">500m</span></div>
+      <div class="row mt-1"><span class="stat" id="batch-info" style="font-size:0.7rem">Batch: —</span></div>
     </div>
 
     <div class="panel">

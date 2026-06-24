@@ -2,8 +2,8 @@ import { collectVisibleLeaves, flattenTree, extractCamParams } from './Octree.js
 import { VisibilitySystem } from '../potree/VisibilitySystem.js';
 import { LRUCache } from '../potree/LRUCache.js';
 
-const MAX_BUDGET = 20000000;
-const MIN_BUDGET = 5000000;
+const MAX_BUDGET = 500000;
+const MIN_BUDGET = 50000;
 
 export class PointCloud {
   constructor(data) {
@@ -85,6 +85,11 @@ export class PointCloud {
     if (this.lru) this.lru.maxNumPoints = val * 2;
   }
 
+  set maxVisibleDistance(val) {
+    this.visibilitySystem.maxVisibleDistance = val;
+    this.visibilitySystem.invalidateCache();
+  }
+
   consumeNeedsRender() {
     const v = this._needsRender;
     this._needsRender = false;
@@ -148,19 +153,17 @@ export class PointCloud {
     if (this.lru) {
       for (let i = 0; i < result.visibleNodes.length; i++) {
         const node = result.visibleNodes[i];
-        if (node.loaded) this.lru.touch(node);
+        if (node.loaded && !node._disposed) this.lru.touch(node);
       }
     }
 
-    const loadedNodes = result.visibleNodes;
-    let writeIdx = 0;
-    for (let i = 0; i < loadedNodes.length; i++) {
-      if (loadedNodes[i].gpuVAO && loadedNodes[i].loaded) {
-        if (writeIdx !== i) loadedNodes[writeIdx] = loadedNodes[i];
-        writeIdx++;
+    const loadedNodes = [];
+    for (let i = 0; i < result.visibleNodes.length; i++) {
+      const node = result.visibleNodes[i];
+      if (node._batchOffset != null && node.loaded) {
+        loadedNodes.push(node);
       }
     }
-    loadedNodes.length = writeIdx;
 
     let total = 0;
     for (let i = 0; i < loadedNodes.length; i++) total += loadedNodes[i].numPoints;

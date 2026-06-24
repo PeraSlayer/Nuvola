@@ -8,13 +8,14 @@ const _corners = new Array(8);
 for (let i = 0; i < 8; i++) _corners[i] = new THREE.Vector3();
 const VIEWPORT_CULL_MARGIN_PX = 40;
 const UNCONDITIONAL_VISIBLE_LEVEL = 2;
-const MIN_PIXEL_ISOMETRIC = 60;
-const MIN_PIXEL_FPS = 80;
+const MIN_PIXEL_ISOMETRIC = 150;
+const MIN_PIXEL_FPS = 200;
 
 export class VisibilitySystem {
   constructor() {
     this.pointBudget = 1000000;
     this.maxNodesLoadingPerFrame = 8;
+    this.maxVisibleDistance = Infinity;
     this._queue = new PriorityQueue();
     this._numNodesLoading = 0;
     this._frameCounter = 0;
@@ -130,6 +131,10 @@ export class VisibilitySystem {
         unloadedNodes.push(node);
       }
 
+      if (node.hasChildren > 0 && (!node.children || node.children.length === 0)) {
+        node.loadChildren();
+      }
+
       if (!node.children || node.children.length === 0) continue;
 
       const childLevel = nodeLevel + 1;
@@ -143,6 +148,8 @@ export class VisibilitySystem {
 
         _tmpVec.copy(sphere.center);
         const dist = position.distanceTo(_tmpVec);
+
+        if (dist > this.maxVisibleDistance) continue;
 
         let weight = Number.MAX_VALUE;
 
@@ -189,13 +196,29 @@ export class VisibilitySystem {
         unloadedNodes.push(node);
       }
 
+      if (node.hasChildren > 0 && (!node.children || node.children.length === 0)) {
+        node.loadChildren();
+      }
+
       if (!node.children || node.children.length === 0) continue;
 
       const childLevel = nodeLevel + 1;
+      const maxDistSq = this.maxVisibleDistance * this.maxVisibleDistance;
 
       for (let i = 0; i < node.children.length; i++) {
         const child = node.children[i];
         if (child.numPoints === 0) continue;
+
+        if (this.maxVisibleDistance < Infinity) {
+          const bb = child.boundingBox;
+          if (bb) {
+            const cx = (bb.min.x + bb.max.x) * 0.5;
+            const cy = (bb.min.y + bb.max.y) * 0.5;
+            const cz = (bb.min.z + bb.max.z) * 0.5;
+            const dx = cx - cp.cx, dy = cy - cp.cy, dz = cz - cp.cz;
+            if (dx * dx + dy * dy + dz * dz > maxDistSq) continue;
+          }
+        }
 
         const projected = this._computeProjectedNodeIsometric(child, cp);
         const screenSize = Math.max(projected.width, projected.height);

@@ -100,6 +100,8 @@ export class MiniMap {
     ctx.strokeStyle = '#30363d';
     ctx.strokeRect(x0, y1, x1 - x0, y0 - y1);
 
+    if (!cloud.positions) return;
+
     ctx.fillStyle = 'rgba(88,166,255,0.35)';
     const step = Math.max(1, Math.floor(cloud.count / 800));
     const p = cloud.positions;

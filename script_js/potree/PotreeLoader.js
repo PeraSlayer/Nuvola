@@ -60,7 +60,7 @@ export class PotreeLoader {
 
     geometry.projection = metadata.projection || null;
 
-    await loader.loadHierarchyAll(geometry);
+    geometry.root = await loader.loadHierarchyRoot(geometry);
 
     return geometry;
   }

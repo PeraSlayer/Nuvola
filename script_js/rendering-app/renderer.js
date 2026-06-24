@@ -20,6 +20,25 @@ const BYTES_PER_POINT_GPU = 12 + 3 + 4 + 1 + 4; // position(3×4) + color(3) + i
 const MAX_DEVICE_PIXEL_RATIO = 3;
 const DEFAULT_AMBIENT = 0.25;
 const DEFAULT_POINT_SIZE = 3.0;
+const BATCH_CAPACITY_BASE = 200_000;
+const BATCH_CAPACITY_MAX = 20_000_000;
+
+function detectBatchCapacity(gl) {
+  const dbgRender = gl.getExtension('WEBGL_debug_renderer_info');
+  let vramMB = 512;
+  if (dbgRender) {
+    const vendor = gl.getParameter(dbgRender.UNMASKED_VENDOR_WEBGL) || '';
+    const gpu = gl.getParameter(dbgRender.UNMASKED_RENDERER_WEBGL) || '';
+    const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const maxBuf = gl.getParameter(gl.MAX_ARRAY_BUFFER_BINDING) || 0;
+    if (maxTex >= 16384) vramMB = 8192;
+    else if (maxTex >= 8192) vramMB = 4096;
+    else if (maxTex >= 4096) vramMB = 2048;
+    else vramMB = Math.max(512, maxBuf ? Math.floor(maxBuf / (1024 * 1024)) : 512);
+  }
+  const cap = Math.floor(BATCH_CAPACITY_BASE * (vramMB / 512));
+  return Math.min(cap, BATCH_CAPACITY_MAX);
+}
 
 class UniformGuard {
   constructor(gl) {
@@ -98,12 +117,37 @@ export class Renderer {
     this._cloudRotBuf = new Float32Array(3);
     this._cloudScaleBuf = new Float32Array(3);
 
+    this._batchCapacity = detectBatchCapacity(this.gl);
+    this._batchVao = null;
+    this._batchVboPos = null;
+    this._batchVboCol = null;
+    this._batchVboInt = null;
+    this._batchVboClass = null;
+    this._batchVboOpacity = null;
+    this._batchIndexVbo = null;
+    this._batchIndexBuf = null;
+    this._batchTotalPoints = 0;
+    this._batchDrawStart = 0;
+    this._batchContiguous = true;
+    this._batchIndexDirty = true;
+    this._batchNextOffset = 0;
+    this._batchFreeRegions = [];
+    this._batchVisibleNodeIds = [];
+    this._batchVisibleOffsets = [];
+    this._batchVisibleCounts = [];
+
     this._initShaders();
     this._initBuffers();
     this._initFBO();
 
     this._onContextLost = (e) => { e.preventDefault(); this._contextLost = true; };
-    this._onContextRestored = () => { this._contextLost = false; this._initShaders(); this._initBuffers(); this._initFBO(); if (this.width > 0) this._setupFBO(this.width, this.height); };
+    this._onContextRestored = () => {
+      this._contextLost = false;
+      this._initShaders();
+      this._initBuffers();
+      this._initFBO();
+      if (this.width > 0) this._setupFBO(this.width, this.height);
+    };
     canvas.addEventListener('webglcontextlost', this._onContextLost);
     canvas.addEventListener('webglcontextrestored', this._onContextRestored);
   }
@@ -221,12 +265,72 @@ export class Renderer {
 
   _initBuffers() {
     const gl = this.gl;
+
     this.vboPos = this._requireResource(gl.createBuffer(), 'position buffer');
     this.vboCol = this._requireResource(gl.createBuffer(), 'color buffer');
     this.vboInt = this._requireResource(gl.createBuffer(), 'intensity buffer');
     this.vboClass = this._requireResource(gl.createBuffer(), 'classification buffer');
     this.vboOpacity = this._requireResource(gl.createBuffer(), 'opacity buffer');
     this._quadVao = this._requireResource(gl.createVertexArray(), 'quad VAO');
+
+    this._initBatchBuffers();
+  }
+
+  _initBatchBuffers() {
+    const gl = this.gl;
+    const cap = this._batchCapacity;
+
+    if (this._batchVao) gl.deleteVertexArray(this._batchVao);
+    this._batchVao = this._requireResource(gl.createVertexArray(), 'batch VAO');
+    gl.bindVertexArray(this._batchVao);
+
+    this._batchVboPos = this._requireResource(gl.createBuffer(), 'batch pos');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboPos);
+    gl.bufferData(gl.ARRAY_BUFFER, cap * 3 * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(this.attrPos);
+    gl.vertexAttribPointer(this.attrPos, 3, gl.FLOAT, false, 0, 0);
+
+    this._batchVboCol = this._requireResource(gl.createBuffer(), 'batch col');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboCol);
+    gl.bufferData(gl.ARRAY_BUFFER, cap * 3, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(this.attrCol);
+    gl.vertexAttribPointer(this.attrCol, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+
+    this._batchVboInt = this._requireResource(gl.createBuffer(), 'batch int');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboInt);
+    gl.bufferData(gl.ARRAY_BUFFER, cap * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(this.attrInt);
+    gl.vertexAttribPointer(this.attrInt, 1, gl.FLOAT, false, 0, 0);
+
+    this._batchVboClass = this._requireResource(gl.createBuffer(), 'batch class');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboClass);
+    gl.bufferData(gl.ARRAY_BUFFER, cap * 1, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(this.attrClass);
+    gl.vertexAttribPointer(this.attrClass, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+
+    this._batchVboOpacity = this._requireResource(gl.createBuffer(), 'batch opac');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboOpacity);
+    gl.bufferData(gl.ARRAY_BUFFER, cap * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(this.attrOpacity);
+    gl.vertexAttribPointer(this.attrOpacity, 1, gl.FLOAT, false, 0, 0);
+
+    this._batchIndexVbo = this._requireResource(gl.createBuffer(), 'batch index');
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._batchIndexVbo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cap * 4, gl.DYNAMIC_DRAW);
+
+    this._batchIndexBuf = new Uint32Array(cap);
+
+    gl.bindVertexArray(null);
+
+    this._batchNextOffset = 0;
+    this._batchFreeRegions = [];
+    this._batchIndexDirty = true;
+    this._batchTotalPoints = 0;
+    this._batchDrawStart = 0;
+    this._batchContiguous = true;
+    this._batchVisibleNodeIds.length = 0;
+    this._batchVisibleOffsets.length = 0;
+    this._batchVisibleCounts.length = 0;
   }
 
   _initFBO() {
@@ -365,87 +469,203 @@ export class Renderer {
     if (!gd || !gd.position) return;
     const numPoints = gd.numPoints;
 
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
+    if (!this._batchVao) this._initBatchBuffers();
 
-    const vboPos = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
-    gl.bufferData(gl.ARRAY_BUFFER, gd.position, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.attrPos);
-    gl.vertexAttribPointer(this.attrPos, 3, gl.FLOAT, false, 0, 0);
+    const offset = this._allocateBatchRegion(numPoints);
+    if (offset < 0) {
+      console.warn('Batch capacity exceeded, skipping node');
+      return;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboPos);
+    gl.bufferSubData(gl.ARRAY_BUFFER, offset * 3 * 4, gd.position);
 
     let colData = gd.color;
     if (!colData) {
       colData = new Uint8Array(numPoints * 3);
       for (let i = 0; i < numPoints * 3; i++) colData[i] = 180;
     }
-    const vboCol = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vboCol);
-    gl.bufferData(gl.ARRAY_BUFFER, colData, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.attrCol);
-    gl.vertexAttribPointer(this.attrCol, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboCol);
+    gl.bufferSubData(gl.ARRAY_BUFFER, offset * 3, colData);
 
     let intData = gd.intensity;
     if (!intData) {
       intData = new Float32Array(numPoints);
     }
-    const vboInt = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vboInt);
-    gl.bufferData(gl.ARRAY_BUFFER, intData, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.attrInt);
-    gl.vertexAttribPointer(this.attrInt, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboInt);
+    gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, intData);
 
     let classData = gd.classification;
     if (!classData) {
       classData = new Uint8Array(numPoints);
     }
-    const vboClass = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vboClass);
-    gl.bufferData(gl.ARRAY_BUFFER, classData, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.attrClass);
-    gl.vertexAttribPointer(this.attrClass, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboClass);
+    gl.bufferSubData(gl.ARRAY_BUFFER, offset * 1, classData);
 
     let opacityData = gd.opacity;
     if (!opacityData) {
       opacityData = new Float32Array(numPoints);
       opacityData.fill(1.0);
     }
-    const vboOpacity = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vboOpacity);
-    gl.bufferData(gl.ARRAY_BUFFER, opacityData, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.attrOpacity);
-    gl.vertexAttribPointer(this.attrOpacity, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboOpacity);
+    gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, opacityData);
 
-    gl.bindVertexArray(null);
+    if (!node._rendererDisposeHandlerRegistered) {
+      node._rendererDisposeHandlerRegistered = true;
+      node.onDispose((n) => {
+        n._rendererDisposeHandlerRegistered = false;
+        this.removeNode(n);
+      });
+    }
 
-    node.gpuVAO = vao;
-    node._gpuVboPos = vboPos;
-    node._gpuVboCol = vboCol;
-    node._gpuVboInt = vboInt;
-    node._gpuVboClass = vboClass;
-    node._gpuVboOpacity = vboOpacity;
-
-    node.onDispose((n) => this.removeNode(n));
-
+    node._batchOffset = offset;
+    node._batchCount = numPoints;
     node.numPoints = numPoints;
 
     const gpuBytes = numPoints * BYTES_PER_POINT_GPU;
     node._gpuBytes = gpuBytes;
     this._gpuBytes += gpuBytes;
+
+    this._batchIndexDirty = true;
+  }
+
+  _allocateBatchRegion(numPoints) {
+    for (let i = 0; i < this._batchFreeRegions.length; i++) {
+      const fr = this._batchFreeRegions[i];
+      if (fr.count >= numPoints) {
+        const offset = fr.offset;
+        if (fr.count === numPoints) {
+          this._batchFreeRegions.splice(i, 1);
+        } else {
+          fr.offset += numPoints;
+          fr.count -= numPoints;
+        }
+        return offset;
+      }
+    }
+
+    if (this._batchNextOffset + numPoints > this._batchCapacity) return -1;
+    const offset = this._batchNextOffset;
+    this._batchNextOffset += numPoints;
+    return offset;
+  }
+
+  _freeBatchRegion(offset, count) {
+    this._batchFreeRegions.push({ offset, count });
+    this._mergeFreeRegions();
+  }
+
+  _mergeFreeRegions() {
+    const fr = this._batchFreeRegions;
+    fr.sort((a, b) => a.offset - b.offset);
+    for (let i = 0; i < fr.length - 1; i++) {
+      if (fr[i].offset + fr[i].count >= fr[i + 1].offset) {
+        fr[i].count = Math.max(fr[i].count, fr[i + 1].offset + fr[i + 1].count - fr[i].offset);
+        fr.splice(i + 1, 1);
+        i--;
+      }
+    }
   }
 
   removeNode(node) {
-    const gl = this.gl;
-    if (node.gpuVAO) { gl.deleteVertexArray(node.gpuVAO); node.gpuVAO = null; }
-    if (node._gpuVboPos) { gl.deleteBuffer(node._gpuVboPos); node._gpuVboPos = null; }
-    if (node._gpuVboCol) { gl.deleteBuffer(node._gpuVboCol); node._gpuVboCol = null; }
-    if (node._gpuVboInt) { gl.deleteBuffer(node._gpuVboInt); node._gpuVboInt = null; }
-    if (node._gpuVboClass) { gl.deleteBuffer(node._gpuVboClass); node._gpuVboClass = null; }
-    if (node._gpuVboOpacity) { gl.deleteBuffer(node._gpuVboOpacity); node._gpuVboOpacity = null; }
+    if (node._batchOffset != null && node._batchCount > 0) {
+      this._freeBatchRegion(node._batchOffset, node._batchCount);
+      node._batchOffset = null;
+      node._batchCount = 0;
+      this._batchIndexDirty = true;
+    }
     const gpuBytes = node._gpuBytes || 0;
     this._gpuBytes -= gpuBytes;
     node._gpuBytes = 0;
     if (this._gpuBytes < 0) this._gpuBytes = 0;
+  }
+
+  _disposeBatchBuffers() {
+    const gl = this.gl;
+    if (this._batchVao) { gl.deleteVertexArray(this._batchVao); this._batchVao = null; }
+    if (this._batchVboPos) { gl.deleteBuffer(this._batchVboPos); this._batchVboPos = null; }
+    if (this._batchVboCol) { gl.deleteBuffer(this._batchVboCol); this._batchVboCol = null; }
+    if (this._batchVboInt) { gl.deleteBuffer(this._batchVboInt); this._batchVboInt = null; }
+    if (this._batchVboClass) { gl.deleteBuffer(this._batchVboClass); this._batchVboClass = null; }
+    if (this._batchVboOpacity) { gl.deleteBuffer(this._batchVboOpacity); this._batchVboOpacity = null; }
+    if (this._batchIndexVbo) { gl.deleteBuffer(this._batchIndexVbo); this._batchIndexVbo = null; }
+    this._batchIndexBuf = null;
+    this._batchTotalPoints = 0;
+    this._batchDrawStart = 0;
+    this._batchContiguous = true;
+    this._batchNextOffset = 0;
+    this._batchFreeRegions = [];
+    this._batchIndexDirty = true;
+    this._batchVisibleNodeIds.length = 0;
+    this._batchVisibleOffsets.length = 0;
+    this._batchVisibleCounts.length = 0;
+  }
+
+  _isBatchIndexCurrent(visibleNodes) {
+    if (this._batchIndexDirty) return false;
+    if (visibleNodes.length !== this._batchVisibleNodeIds.length) return false;
+
+    for (let i = 0; i < visibleNodes.length; i++) {
+      const node = visibleNodes[i];
+      if (node.id !== this._batchVisibleNodeIds[i] ||
+          node._batchOffset !== this._batchVisibleOffsets[i] ||
+          node._batchCount !== this._batchVisibleCounts[i]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  _rebuildBatchIndex(visibleNodes) {
+    const gl = this.gl;
+    let total = 0;
+    let contiguous = true;
+    let expected = -1;
+    let drawStart = 0;
+
+    for (let i = 0; i < visibleNodes.length; i++) {
+      const n = visibleNodes[i];
+      if (n._batchOffset == null || n._batchCount <= 0) continue;
+      if (expected < 0) {
+        expected = n._batchOffset;
+        drawStart = n._batchOffset;
+      }
+      if (n._batchOffset !== expected) contiguous = false;
+      expected = n._batchOffset + n._batchCount;
+      total += n._batchCount;
+    }
+
+    this._batchTotalPoints = total;
+    this._batchDrawStart = drawStart;
+    this._batchContiguous = contiguous;
+
+    if (!contiguous && total > 0) {
+      const idx = this._batchIndexBuf;
+      let off = 0;
+      for (let i = 0; i < visibleNodes.length; i++) {
+        const n = visibleNodes[i];
+        if (n._batchOffset == null || n._batchCount <= 0) continue;
+        const base = n._batchOffset;
+        const count = n._batchCount;
+        for (let j = 0; j < count; j++) idx[off + j] = base + j;
+        off += count;
+      }
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._batchIndexVbo);
+      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, idx.subarray(0, total));
+    }
+
+    this._batchVisibleNodeIds.length = visibleNodes.length;
+    this._batchVisibleOffsets.length = visibleNodes.length;
+    this._batchVisibleCounts.length = visibleNodes.length;
+    for (let i = 0; i < visibleNodes.length; i++) {
+      const node = visibleNodes[i];
+      this._batchVisibleNodeIds[i] = node.id;
+      this._batchVisibleOffsets[i] = node._batchOffset;
+      this._batchVisibleCounts[i] = node._batchCount;
+    }
+
+    this._batchIndexDirty = false;
   }
 
   dispose() {
@@ -453,6 +673,7 @@ export class Renderer {
     this.canvas.removeEventListener('webglcontextlost', this._onContextLost);
     this.canvas.removeEventListener('webglcontextrestored', this._onContextRestored);
     this._disposeCloudVAOs();
+    this._disposeBatchBuffers();
 
     if (this.vboPos)  { gl.deleteBuffer(this.vboPos);  this.vboPos = null; }
     if (this.vboCol)  { gl.deleteBuffer(this.vboCol);  this.vboCol = null; }
@@ -485,6 +706,10 @@ export class Renderer {
     total += fboTex * 2;
     total += this.width * this.height * 3;
     return (total / (1024 * 1024)).toFixed(1);
+  }
+
+  get batchCapacity() {
+    return this._batchCapacity;
   }
 
   getBench() {
@@ -649,12 +874,15 @@ export class Renderer {
       gl.depthMask(true);
       gl.colorMask(false, false, false, false);
 
-      if (nodes) {
-        for (let i = 0; i < nodes.length; i++) {
-          const node = nodes[i];
-          if (!node.gpuVAO) continue;
-          gl.bindVertexArray(node.gpuVAO);
-          gl.drawArrays(gl.POINTS, 0, node.numPoints);
+      if (nodes && this._batchVao) {
+        if (!this._isBatchIndexCurrent(nodes)) this._rebuildBatchIndex(nodes);
+        if (this._batchTotalPoints > 0) {
+          gl.bindVertexArray(this._batchVao);
+          if (this._batchContiguous) {
+            gl.drawArrays(gl.POINTS, this._batchDrawStart, this._batchTotalPoints);
+          } else {
+            gl.drawElements(gl.POINTS, this._batchTotalPoints, gl.UNSIGNED_INT, 0);
+          }
         }
       } else if (hasIndices) {
         if (!this._dynamicIndexVao) {
@@ -696,15 +924,12 @@ export class Renderer {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-      if (nodes) {
-        for (let i = 0; i < nodes.length; i++) {
-          const node = nodes[i];
-          if (!node.gpuVAO) continue;
-          gl.bindVertexArray(node.gpuVAO);
-          if (node.spacing > 0) {
-            this._pointUniforms.uniform1f(this.uPoint.spacing, 'point.nodeSpacing', node.spacing);
-          }
-          gl.drawArrays(gl.POINTS, 0, node.numPoints);
+      if (nodes && this._batchVao && this._batchTotalPoints > 0) {
+        gl.bindVertexArray(this._batchVao);
+        if (this._batchContiguous) {
+          gl.drawArrays(gl.POINTS, this._batchDrawStart, this._batchTotalPoints);
+        } else {
+          gl.drawElements(gl.POINTS, this._batchTotalPoints, gl.UNSIGNED_INT, 0);
         }
       } else if (hasIndices) {
         gl.drawElements(gl.POINTS, drawCount, gl.UNSIGNED_INT, 0);

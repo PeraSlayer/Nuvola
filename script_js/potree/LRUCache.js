@@ -86,7 +86,14 @@ export class LRUCache {
 
   _moveToEnd(item) {
     if (item === this.last) return;
-    this._unlink(item);
-    this._append(item);
+    if (item.prev) item.prev.next = item.next;
+    else this.first = item.next;
+    if (item.next) item.next.prev = item.prev;
+    else this.last = item.prev;
+    item.prev = this.last;
+    item.next = null;
+    if (this.last) this.last.next = item;
+    this.last = item;
+    if (!this.first) this.first = item;
   }
 }

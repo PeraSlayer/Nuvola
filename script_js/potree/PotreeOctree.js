@@ -31,6 +31,7 @@ export class OctreeGeometryNode {
 
     this._oneTimeDisposeHandlers = [];
     this._loadCallbacks = [];
+    this._disposed = false;
   }
 
   getNumPoints() {
@@ -70,7 +71,10 @@ export class OctreeGeometryNode {
   }
 
   loadChildren() {
-    return this.geometry.loader.loadHierarchy(this);
+    if (!this.children || this.children.length === 0) {
+      return this.geometry.loader.loadChildren(this);
+    }
+    return null;
   }
 
   addChild(child) {
@@ -88,17 +92,11 @@ export class OctreeGeometryNode {
   }
 
   dispose() {
-    if (this.gpuVAO) {
-      for (const handler of this._oneTimeDisposeHandlers) {
-        handler(this);
-      }
-      this._oneTimeDisposeHandlers.length = 0;
-      this.gpuVAO = null;
+    for (const handler of this._oneTimeDisposeHandlers) {
+      handler(this);
     }
-    this.geometryData = null;
-    this.loaded = false;
-    this.loading = false;
-    this._loadCallbacks = [];
+    this._oneTimeDisposeHandlers.length = 0;
+    this._disposed = true;
   }
 
   disposeDescendants() {
