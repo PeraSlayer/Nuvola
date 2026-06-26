@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Nuvola — 2.5D Point Cloud Viewer (PLY, LAS, LAZ, XYZ)</title>
+  <title>Nuvola</title>
   <script type="importmap">
   {
     "imports": {
@@ -16,7 +16,7 @@
 <body>
 <div id="app">
   <aside id="sidebar">
-    <h1>Nuvola<span>Multi-Format Point Cloud Viewer</span></h1>
+    <h1>Nuvola<span>Point Cloud Viewer</span></h1>
 
     <div class="panel">
       <h2>Load Data</h2>
@@ -24,7 +24,7 @@
       <input type="file" id="file-input" accept=".ply,.gz,.ply.gz,.las,.laz,.xyz,.txt,.pts,.rxp" />
       <div class="row mt-2"><input type="text" id="potree-url" placeholder="Potree metadata.json URL" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:5px 8px;font-size:0.75rem" /></div>
       <button class="full" id="btn-load-potree" style="margin-top:4px">Load Potree Dataset</button>
-      <p class="stat mt-2" id="file-info">No file loaded<br/>Supported: PLY, LAS, LAZ, XYZ, TXT, PTS</p>
+      <p class="stat mt-2" id="file-info">No file loaded<br/>PLY, LAS, LAZ, XYZ</p>
     </div>
     
     <div class="panel">
@@ -127,7 +127,7 @@
   <main id="main">
     <button id="toggle-sidebar">☰</button>
     <canvas id="glcanvas"></canvas>
-    <div id="drop-overlay"><p><strong>Drop point cloud</strong>PLY, LAS, LAZ, XYZ, TXT, PTS</p></div>
+    <div id="drop-overlay"><p><strong>Drop to open</strong>PLY, LAS, LAZ, XYZ</p></div>
     <div id="hud"></div>
     <div id="minimap"><canvas id="minimap-canvas" width="140" height="140"></canvas></div>
     <div id="measure-info"></div>
