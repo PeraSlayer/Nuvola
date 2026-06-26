@@ -42,20 +42,22 @@ import { bindInput }        from './input.js';
 
 /**
  * Read a LAS/LAZ file: transparently decompresses LAZ before returning the buffer.
+ * For LAS files > 2GB, returns a File reference for chunked reading.
  * @param {File} file
  * @param {string} format 'LAS' or 'LAZ'
- * @returns {Promise<ArrayBuffer>}
+ * @returns {Promise<ArrayBuffer|{file, type}>}
  */
 async function _readLASFile(file, format) {
-  const buf = await file.arrayBuffer();
   if (format === 'LAZ') {
+    const buf = await file.arrayBuffer();
     try {
       return await decompressLAZ(buf);
     } catch (err) {
       throw new Error('LAZ decompression failed: ' + err.message);
     }
   }
-  return buf;
+  // LAS non compresso: restituisci il File object per chunked reading
+  return { file, type: 'las-file' };
 }
 
 const APP_OCTREE_WORKER = `
@@ -514,7 +516,8 @@ class App {
 
     let buf, data, procResult;
     try {
-      if (file.size > 4 * 1024 * 1024 * 1024) {
+      // LAS/LAZ files can be very large; skip size check for them (chunked reading handles large files)
+      if (format !== 'LAS' && format !== 'LAZ' && file.size > 4 * 1024 * 1024 * 1024) {
         throw new Error(`File troppo grande (${(file.size / 1024 / 1024).toFixed(1)}MB). Limite: 4GB.`);
       }
 
