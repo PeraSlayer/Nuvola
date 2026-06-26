@@ -77,7 +77,8 @@ function parseHeader(dv) {
   };
 }
 
-function parseChunk(buffer, header, numPoints) {
+function parseRawChunk(buffer, header, numPoints) {
+  // Parse raw point data chunk (no header validation)
   const dv = new DataView(buffer);
   const positions = new Float32Array(numPoints * 3);
   const colors = new Uint8Array(numPoints * 3);
@@ -127,78 +128,82 @@ function parseChunk(buffer, header, numPoints) {
   };
 }
 
+function parseFull(buffer) {
+  const dv = new DataView(buffer);
+  const header = parseHeader(dv);
+  const { pointOffset, pointCount, pointRecordLength, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, hasColor, rgbOffset } = header;
+  const fileSize = buffer.byteLength;
+  
+  const positions = new Float32Array(pointCount * 3);
+  const colors = new Uint8Array(pointCount * 3);
+  const intensity = new Float32Array(pointCount);
+  
+  let minI = Infinity, maxI = -Infinity;
+  
+  for (let i = 0; i < pointCount; i++) {
+    const pointStart = pointOffset + i * pointRecordLength;
+    if (pointStart + pointRecordLength > fileSize) break;
+    
+    const x = dv.getInt32(pointStart, true) * scaleX + offsetX;
+    const y = dv.getInt32(pointStart + 4, true) * scaleY + offsetY;
+    const z = dv.getInt32(pointStart + 8, true) * scaleZ + offsetZ;
+    
+    positions[i*3] = x;
+    positions[i*3+1] = y;
+    positions[i*3+2] = z;
+    
+    const iVal = dv.getUint16(pointStart, true);
+    intensity[i] = iVal;
+    if (iVal < minI) minI = iVal;
+    if (iVal > maxI) maxI = iVal;
+    
+    if (hasColor && rgbOffset !== -1 && pointStart + rgbOffset + 6 <= fileSize) {
+      let r = dv.getUint16(pointStart + rgbOffset, true);
+      let g = dv.getUint16(pointStart + rgbOffset + 2, true);
+      let b = dv.getUint16(pointStart + rgbOffset + 4, true);
+      colors[i*3] = Math.min(255, r / 256);
+      colors[i*3+1] = Math.min(255, g / 256);
+      colors[i*3+2] = Math.min(255, b / 256);
+    } else {
+      colors[i*3] = colors[i*3+1] = colors[i*3+2] = 0;
+    }
+  }
+  
+  const iRange = maxI - minI;
+  for (let i = 0; i < pointCount; i++) {
+    if (iRange > 0) intensity[i] = (intensity[i] - minI) / iRange;
+    else intensity[i] = 0.5;
+  }
+  
+  if (!hasColor) {
+    for (let i = 0; i < pointCount; i++) {
+      const val = Math.floor(intensity[i] * 255);
+      colors[i*3] = val;
+      colors[i*3+1] = val;
+      colors[i*3+2] = val;
+    }
+  }
+  
+  return { positions, colors, intensity, count: pointCount, hasColor, hasIntensity: true };
+}
+
 self.onmessage = function(e) {
   try {
     const msg = e.data;
     if (msg.type === 'parseHeader') {
       const header = parseHeader(new DataView(msg.buffer));
       self.postMessage({ type: 'header', header });
-    } else if (msg.type === 'parseChunk') {
-      const result = parseChunk(msg.buffer, msg.header, msg.numPoints);
+    } else if (msg.type === 'parseRawChunk') {
+      const result = parseRawChunk(msg.buffer, msg.header, msg.numPoints);
       self.postMessage(
         { type: 'chunk', ...result },
         [result.positions.buffer, result.colors.buffer, result.intensity.buffer]
       );
     } else if (msg.type === 'parseFull') {
-      // Legacy method for ArrayBuffer input (files < 2GB)
-      const dv = new DataView(msg.buffer);
-      const header = parseHeader(dv);
-      const { pointOffset, pointCount, pointRecordLength, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, hasColor, rgbOffset } = header;
-      const fileSize = msg.buffer.byteLength;
-      
-      const positions = new Float32Array(pointCount * 3);
-      const colors = new Uint8Array(pointCount * 3);
-      const intensity = new Float32Array(pointCount);
-      
-      let minI = Infinity, maxI = -Infinity;
-      
-      for (let i = 0; i < pointCount; i++) {
-        const pointStart = pointOffset + i * pointRecordLength;
-        if (pointStart + pointRecordLength > fileSize) break;
-        
-        const x = dv.getInt32(pointStart, true) * scaleX + offsetX;
-        const y = dv.getInt32(pointStart + 4, true) * scaleY + offsetY;
-        const z = dv.getInt32(pointStart + 8, true) * scaleZ + offsetZ;
-        
-        positions[i*3] = x;
-        positions[i*3+1] = y;
-        positions[i*3+2] = z;
-        
-        const iVal = dv.getUint16(pointStart, true);
-        intensity[i] = iVal;
-        if (iVal < minI) minI = iVal;
-        if (iVal > maxI) maxI = iVal;
-        
-        if (hasColor && rgbOffset !== -1 && pointStart + rgbOffset + 6 <= fileSize) {
-          let r = dv.getUint16(pointStart + rgbOffset, true);
-          let g = dv.getUint16(pointStart + rgbOffset + 2, true);
-          let b = dv.getUint16(pointStart + rgbOffset + 4, true);
-          colors[i*3] = Math.min(255, r / 256);
-          colors[i*3+1] = Math.min(255, g / 256);
-          colors[i*3+2] = Math.min(255, b / 256);
-        } else {
-          colors[i*3] = colors[i*3+1] = colors[i*3+2] = 0;
-        }
-      }
-      
-      const iRange = maxI - minI;
-      for (let i = 0; i < pointCount; i++) {
-        if (iRange > 0) intensity[i] = (intensity[i] - minI) / iRange;
-        else intensity[i] = 0.5;
-      }
-      
-      if (!hasColor) {
-        for (let i = 0; i < pointCount; i++) {
-          const val = Math.floor(intensity[i] * 255);
-          colors[i*3] = val;
-          colors[i*3+1] = val;
-          colors[i*3+2] = val;
-        }
-      }
-      
+      const result = parseFull(msg.buffer);
       self.postMessage(
-        { type: 'full', positions, colors, intensity, count: pointCount, hasColor, hasIntensity: true },
-        [positions.buffer, colors.buffer, intensity.buffer]
+        { type: 'full', ...result },
+        [result.positions.buffer, result.colors.buffer, result.intensity.buffer]
       );
     }
   } catch(err) {
@@ -302,7 +307,7 @@ export class LASLoader {
         const chunkBuf = await chunkBlob.arrayBuffer();
         
         const chunkMsg = await this._sendToWorker(worker, {
-          type: 'parseChunk',
+          type: 'parseRawChunk',
           buffer: chunkBuf,
           header: header,
           numPoints: numPoints
