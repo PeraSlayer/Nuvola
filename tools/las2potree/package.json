@@ -1,0 +1,14 @@
+{
+  "name": "las2potree",
+  "version": "1.0.0",
+  "description": "LAS/LAZ to Potree v2.0 converter",
+  "type": "module",
+  "bin": {
+    "las2potree": "./src/index.js"
+  },
+  "scripts": {
+    "convert": "node src/index.js"
+  },
+  "keywords": ["las", "laz", "potree", "point-cloud", "converter"],
+  "license": "MIT"
+}

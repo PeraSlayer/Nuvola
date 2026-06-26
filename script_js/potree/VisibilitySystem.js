@@ -14,7 +14,7 @@ const MIN_PIXEL_FPS = 200;
 export class VisibilitySystem {
   constructor() {
     this.pointBudget = 1000000;
-    this.maxNodesLoadingPerFrame = 8;
+    this._maxNodesLoadingPerFrame = 16;
     this.maxVisibleDistance = Infinity;
     this._queue = new PriorityQueue();
     this._numNodesLoading = 0;
@@ -31,6 +31,19 @@ export class VisibilitySystem {
       c: 1, s: 0,
       zoom: 1, panX: 0, panY: 0,
     };
+
+    this._prefetchEnabled = true;
+    this._prefetchBudget = 4;
+    this._lastCameraPos = null;
+    this._cameraVelocity = null;
+  }
+
+  set maxNodesLoadingPerFrame(val) {
+    this._maxNodesLoadingPerFrame = Math.max(4, Math.min(64, val));
+  }
+
+  get maxNodesLoadingPerFrame() {
+    return this._maxNodesLoadingPerFrame;
   }
 
   get numNodesLoading() {

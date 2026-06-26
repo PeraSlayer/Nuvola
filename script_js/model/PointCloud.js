@@ -2,8 +2,8 @@ import { collectVisibleLeaves, extractCamParams } from './Octree.js';
 import { VisibilitySystem } from '../potree/VisibilitySystem.js';
 import { LRUCache } from '../potree/LRUCache.js';
 
-const MAX_BUDGET = 500000;
-const MIN_BUDGET = 50000;
+const COLLECT_BUF_INITIAL = 2_000_000;
+const COLLECT_BUF_MAX = 100_000_000;
 
 export class PointCloud {
   constructor(data) {
@@ -53,7 +53,8 @@ export class PointCloud {
       this._pickCells = data.pickCells || 128;
     }
 
-    this._collectBuf = this.octreeGeometry ? null : new Uint32Array(MAX_BUDGET);
+    this._collectBuf = this.octreeGeometry ? null : new Uint32Array(COLLECT_BUF_INITIAL);
+    this._collectBufCapacity = COLLECT_BUF_INITIAL;
     this._leafRefs = [];
     this._loadedNodes = [];
     this.renderer = null;
@@ -105,9 +106,9 @@ export class PointCloud {
     if (!this.octree) return { indices: null, count: this.count };
 
     const total = this.count;
-    const buf = this._collectBuf;
+    const budget = this.visibilitySystem ? this.visibilitySystem.pointBudget : total;
 
-    if (total <= MAX_BUDGET) {
+    if (total <= budget) {
       return { indices: null, count: this.count };
     }
 
@@ -119,7 +120,16 @@ export class PointCloud {
     const leaves = this._leafRefs;
     for (let li = 0; li < leaves.length; li++) visCount += leaves[li].length;
 
-    if (visCount <= MAX_BUDGET) {
+    const target = Math.min(budget, visCount);
+
+    if (target >= this._collectBufCapacity) {
+      const newCap = Math.min(COLLECT_BUF_MAX, Math.max(this._collectBufCapacity * 2, target + 100000));
+      this._collectBuf = new Uint32Array(newCap);
+      this._collectBufCapacity = newCap;
+    }
+    const buf = this._collectBuf;
+
+    if (visCount <= budget) {
       let off = 0;
       for (let li = 0; li < leaves.length; li++) {
         buf.set(leaves[li], off);
@@ -128,8 +138,7 @@ export class PointCloud {
       return { indices: buf.subarray(0, off), count: off };
     }
 
-    const target = Math.min(MAX_BUDGET, Math.max(MIN_BUDGET, Math.round(visCount * 0.5)));
-    const stride = Math.round(visCount / target);
+    const stride = Math.max(1, Math.round(visCount / target));
     let outIdx = 0, globalPos = 0;
     for (let li = 0; li < leaves.length && outIdx < target; li++) {
       const leaf = leaves[li];
@@ -143,7 +152,7 @@ export class PointCloud {
   }
 
   _getDrawCallPotree(camera, viewportW, viewportH) {
-    const budget = Math.min(this.visibilitySystem.pointBudget, MAX_BUDGET);
+    const budget = this.visibilitySystem.pointBudget;
     const t0 = performance.now();
     const result = this.visibilitySystem.selectNodes(
       camera, this.octreeGeometry, viewportW, viewportH, budget

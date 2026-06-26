@@ -21,7 +21,7 @@ const MAX_DEVICE_PIXEL_RATIO = 3;
 const DEFAULT_AMBIENT = 0.25;
 const DEFAULT_POINT_SIZE = 3.0;
 const BATCH_CAPACITY_BASE = 200_000;
-const BATCH_CAPACITY_MAX = 20_000_000;
+const BATCH_CAPACITY_CEILING = 50_000_000;
 
 function detectBatchCapacity(gl) {
   const dbgRender = gl.getExtension('WEBGL_debug_renderer_info');
@@ -37,7 +37,18 @@ function detectBatchCapacity(gl) {
     else vramMB = Math.max(512, maxBuf ? Math.floor(maxBuf / (1024 * 1024)) : 512);
   }
   const cap = Math.floor(BATCH_CAPACITY_BASE * (vramMB / 512));
-  return Math.min(cap, BATCH_CAPACITY_MAX);
+  return Math.min(cap, BATCH_CAPACITY_CEILING);
+}
+
+function detectVRAM_MB(gl) {
+  const dbgRender = gl.getExtension('WEBGL_debug_renderer_info');
+  if (!dbgRender) return 512;
+  const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  const maxBuf = gl.getParameter(gl.MAX_ARRAY_BUFFER_BINDING) || 0;
+  if (maxTex >= 16384) return 8192;
+  if (maxTex >= 8192) return 4096;
+  if (maxTex >= 4096) return 2048;
+  return Math.max(512, maxBuf ? Math.floor(maxBuf / (1024 * 1024)) : 512);
 }
 
 class UniformGuard {
@@ -119,6 +130,8 @@ export class Renderer {
     this._cloudScaleBuf = new Float32Array(3);
 
     this._batchCapacity = detectBatchCapacity(this.gl);
+    this._detectedVRAM_MB = detectVRAM_MB(this.gl);
+    this._suggestedLRUBudget = Math.floor(this._detectedVRAM_MB * 0.6) * 1024 * 1024;
     this._batchVao = null;
     this._batchVboPos = null;
     this._batchVboCol = null;
@@ -613,7 +626,9 @@ export class Renderer {
     return true;
   }
 
-  _rebuildBatchIndex(visibleNodes) {
+  _rebuildBatchIndex(visibleNodes, cameraPosition) {
+    const sortedNodes = this._sortNodesByDepth(visibleNodes, cameraPosition);
+
     let total = 0;
     let contiguous = true;
     let expected = -1;
@@ -623,8 +638,8 @@ export class Renderer {
     let runStart = -1;
     let runEnd = 0;
 
-    for (let i = 0; i < visibleNodes.length; i++) {
-      const n = visibleNodes[i];
+    for (let i = 0; i < sortedNodes.length; i++) {
+      const n = sortedNodes[i];
       if (n._batchOffset == null || n._batchCount <= 0) continue;
       if (expected < 0) {
         expected = n._batchOffset;
@@ -646,17 +661,37 @@ export class Renderer {
     this._batchDrawStart = drawStart;
     this._batchContiguous = contiguous;
 
-    this._batchVisibleNodeIds.length = visibleNodes.length;
-    this._batchVisibleOffsets.length = visibleNodes.length;
-    this._batchVisibleCounts.length = visibleNodes.length;
-    for (let i = 0; i < visibleNodes.length; i++) {
-      const node = visibleNodes[i];
+    this._batchVisibleNodeIds.length = sortedNodes.length;
+    this._batchVisibleOffsets.length = sortedNodes.length;
+    this._batchVisibleCounts.length = sortedNodes.length;
+    for (let i = 0; i < sortedNodes.length; i++) {
+      const node = sortedNodes[i];
       this._batchVisibleNodeIds[i] = node.id;
       this._batchVisibleOffsets[i] = node._batchOffset;
       this._batchVisibleCounts[i] = node._batchCount;
     }
 
     this._batchIndexDirty = false;
+  }
+
+  _sortNodesByDepth(nodes, cameraPosition) {
+    if (!cameraPosition || nodes.length < 2) return nodes;
+
+    const sorted = nodes.slice();
+    sorted.sort((a, b) => {
+      const aCenter = a.boundingSphere?.center;
+      const bCenter = b.boundingSphere?.center;
+      if (!aCenter || !bCenter) return 0;
+
+      const aDist = (aCenter.x - cameraPosition.x) ** 2 +
+                    (aCenter.y - cameraPosition.y) ** 2 +
+                    (aCenter.z - cameraPosition.z) ** 2;
+      const bDist = (bCenter.x - cameraPosition.x) ** 2 +
+                    (bCenter.y - cameraPosition.y) ** 2 +
+                    (bCenter.z - cameraPosition.z) ** 2;
+      return aDist - bDist;
+    });
+    return sorted;
   }
 
   dispose() {
@@ -701,6 +736,14 @@ export class Renderer {
 
   get batchCapacity() {
     return this._batchCapacity;
+  }
+
+  get detectedVRAM_MB() {
+    return this._detectedVRAM_MB;
+  }
+
+  get suggestedLRUBudget() {
+    return this._suggestedLRUBudget;
   }
 
   getBench() {
@@ -888,9 +931,10 @@ export class Renderer {
       gl.disable(gl.BLEND);
 
       if (nodes && this._batchVao) {
+        const camPos = camera.getWorldPosition ? camera.getWorldPosition() : null;
         if (!this._isBatchIndexCurrent(nodes)) {
           const rt0 = performance.now();
-          this._rebuildBatchIndex(nodes);
+          this._rebuildBatchIndex(nodes, camPos);
           rebuildMs = performance.now() - rt0;
         }
         if (this._batchTotalPoints > 0) {

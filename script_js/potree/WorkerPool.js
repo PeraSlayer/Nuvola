@@ -1,8 +1,11 @@
 export class WorkerPool {
-  constructor(maxWorkers = 4) {
-    this._maxWorkers = maxWorkers;
+  constructor(maxWorkers) {
+    this._maxWorkers = maxWorkers || (typeof navigator !== 'undefined'
+      ? Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1))
+      : 4);
     this._available = new Map();
     this._active = new Map();
+    this._pendingQueue = new Map();
   }
 
   getWorker(url) {
@@ -24,10 +27,33 @@ export class WorkerPool {
     return worker;
   }
 
+  requestWorker(url, callback) {
+    const worker = this.getWorker(url);
+    if (worker) {
+      callback(worker);
+      return;
+    }
+    let queue = this._pendingQueue.get(url);
+    if (!queue) {
+      queue = [];
+      this._pendingQueue.set(url, queue);
+    }
+    queue.push(callback);
+  }
+
   returnWorker(worker) {
     const url = this._active.get(worker);
     if (!url) return;
     this._active.delete(worker);
+
+    let queue = this._pendingQueue.get(url);
+    if (queue && queue.length > 0) {
+      const nextCallback = queue.shift();
+      this._active.set(worker, url);
+      nextCallback(worker);
+      return;
+    }
+
     let available = this._available.get(url);
     if (!available) {
       available = [];

@@ -7,6 +7,12 @@ export class LRUCache {
     this.gpuBytes = 0;
     this.maxNumPoints = Infinity;
     this.maxGPUBytes = 512 * 1024 * 1024;
+    this._evictionThreshold = 0.9;
+  }
+
+  setGPUBudget(vramMB) {
+    const usable = Math.floor(vramMB * 0.6);
+    this.maxGPUBytes = usable * 1024 * 1024;
   }
 
   touch(node) {
@@ -35,8 +41,17 @@ export class LRUCache {
     return this.first;
   }
 
+  updateGPUUsage(node) {
+    const item = this.items.get(node.id);
+    if (!item) return;
+    const oldBytes = item.node._gpuBytes || 0;
+    const newBytes = node._gpuBytes || 0;
+    this.gpuBytes += newBytes - oldBytes;
+  }
+
   freeMemory() {
-    while (this.first && (this.numPoints > this.maxNumPoints || this.gpuBytes > this.maxGPUBytes)) {
+    const threshold = this.maxGPUBytes * this._evictionThreshold;
+    while (this.first && (this.numPoints > this.maxNumPoints || this.gpuBytes > threshold)) {
       const item = this.first;
       this.remove(item.node);
       item.node.dispose();

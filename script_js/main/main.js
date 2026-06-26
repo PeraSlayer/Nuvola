@@ -430,8 +430,11 @@ class App {
 
       this.cloud = new PointCloud(data);
       this.cloud.renderer = this.renderer;
+      if (this.cloud.lru) {
+        this.cloud.lru.setGPUBudget(this.renderer.detectedVRAM_MB);
+      }
       const autoBudget = this._autoScaleBudget
-        ? Math.floor(this.renderer.batchCapacity * 0.4)
+        ? Math.floor(this.renderer.batchCapacity * 0.6)
         : this._pointBudget;
       this.cloud.pointBudget = autoBudget;
       if (data.bounds) {
@@ -614,8 +617,11 @@ class App {
       this.renderer.uploadPointCloud(this.cloud);
       this.camera.setRefCenter(this.cloud.center);
       if (this.cloud.octreeGeometry) {
+        if (this.cloud.lru) {
+          this.cloud.lru.setGPUBudget(this.renderer.detectedVRAM_MB);
+        }
         const autoBudget = this._autoScaleBudget
-          ? Math.floor(this.renderer.batchCapacity * 0.4)
+          ? Math.floor(this.renderer.batchCapacity * 0.6)
           : this._pointBudget;
         this.cloud.pointBudget = autoBudget;
         if (this.cloud.bounds) {

@@ -4,9 +4,12 @@ import { WorkerPool } from './WorkerPool.js';
 import { createDecoderWorker } from './DecoderWorker.js';
 
 const HIERARCHY_ENTRY_FIXED_SIZE = 22;
-const HIERARCHY_ENTRY_VARIABLE_SIZE = 20;
-const DECODER_WORKER_COUNT = 2;
-const BIN_ENTRY_SIZE = 21; // childMask(1) + numPoints(4) + byteOffset(8) + byteSize(8)
+const HIERARCHY_ENTRY_VARIABLE_SIZE = 22;
+const DECODER_WORKER_COUNT = typeof navigator !== 'undefined'
+  ? Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1))
+  : 4;
+const BIN_ENTRY_SIZE = 21;
+const MAX_CONCURRENT_FETCHES = 8; // childMask(1) + numPoints(4) + byteOffset(8) + byteSize(8)
 
 export class NodeLoader {
   constructor() {
@@ -192,6 +195,7 @@ export class NodeLoader {
         for (const cb of node._loadCallbacks) {
           try { cb(node); } catch (e) { console.warn('Node load callback error:', e); }
         }
+        node._loadCallbacks.length = 0;
       } else {
         node.loaded = true;
         node.loading = false;

@@ -167,7 +167,7 @@ export class UIController {
       a._autoScaleBudget = e.target.checked;
       if (a.cloud) {
         const autoBudget = a._autoScaleBudget
-          ? Math.floor(a.renderer.batchCapacity * 0.4)
+          ? Math.floor(a.renderer.batchCapacity * 0.6)
           : a._pointBudget;
         a.cloud.pointBudget = autoBudget;
       }
@@ -218,11 +218,20 @@ export class UIController {
 
   /** Update the stats panel with current FPS, draw count, and total points. */
   updateStats(fps, lodCount, totalCount) {
-    const memMB = this.app.renderer ? this.app.renderer.getMemoryMB() : '—';
+    const r = this.app.renderer;
+    const memMB = r ? r.getMemoryMB() : '—';
+    const vramMB = r ? r.detectedVRAM_MB : '—';
+    const batchCap = r ? (r.batchCapacity / 1000).toFixed(0) + 'k' : '—';
+    const lruMB = this.app.cloud?.lru ? (this.app.cloud.lru.gpuBytes / (1024 * 1024)).toFixed(1) : '0';
+    const lruMaxMB = this.app.cloud?.lru ? (this.app.cloud.lru.maxGPUBytes / (1024 * 1024)).toFixed(0) : '—';
+
     document.getElementById('stats-info').innerHTML =
       `Points: <b>${totalCount.toLocaleString()}</b><br/>` +
       `Rendering: <b>${lodCount.toLocaleString()}</b><br/>` +
       `FPS: <b>${fps.toFixed(0)}</b><br/>` +
-      `GPU Mem: <b>${memMB} MB (estimated)</b>`;
+      `GPU Mem: <b>${memMB} MB</b> (est.)<br/>` +
+      `VRAM: <b>${vramMB} MB</b> detected<br/>` +
+      `Batch cap: <b>${batchCap}</b> points<br/>` +
+      `LRU: <b>${lruMB} / ${lruMaxMB} MB</b>`;
   }
 }
