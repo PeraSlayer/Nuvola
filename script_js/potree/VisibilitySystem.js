@@ -6,10 +6,10 @@ const _tmpVec = new THREE.Vector3();
 const _proj = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
 const _corners = new Array(8);
 for (let i = 0; i < 8; i++) _corners[i] = new THREE.Vector3();
-const VIEWPORT_CULL_MARGIN_PX = 40;
+const VIEWPORT_CULL_MARGIN_PX = 20;
 const UNCONDITIONAL_VISIBLE_LEVEL = 2;
-const MIN_PIXEL_ISOMETRIC = 150;
-const MIN_PIXEL_FPS = 200;
+const MIN_PIXEL_ISOMETRIC = 250;
+const MIN_PIXEL_FPS = 250;
 
 export class VisibilitySystem {
   constructor() {
@@ -123,6 +123,11 @@ export class VisibilitySystem {
       if (accumulated + np > budget) break;
 
       const projected = this._computeProjectedNodeIsometric(node, cp, viewportW, viewportH);
+      
+      if (projected.width === 0 && projected.height === 0) {
+        continue;
+      }
+      
       const screenSize = Math.max(projected.width, projected.height);
 
       if (screenSize >= minPixel && node.hasChildren) {
@@ -135,6 +140,9 @@ export class VisibilitySystem {
             if (child.numPoints === 0) continue;
             const childProjected = this._computeProjectedNodeIsometric(child, cp, viewportW, viewportH);
             const childScreenSize = Math.max(childProjected.width, childProjected.height);
+            
+            if (childScreenSize === 0) continue;
+            
             this._projCache.set(child, childScreenSize);
             this._queue.push(child, childScreenSize || minPixel);
           }
@@ -186,6 +194,22 @@ export class VisibilitySystem {
       const np = node.getNumPoints();
       if (accumulated + np > budget) break;
 
+      const sphere = node.boundingSphere;
+      if (sphere && sphere.radius > 0) {
+        _tmpVec.copy(sphere.center);
+        const dist = position.distanceTo(_tmpVec);
+
+        if (dist > this.maxVisibleDistance) continue;
+
+        if (dist > sphere.radius) {
+          const screenPixelRadius = sphere.radius * projNumerator / dist;
+
+          if (screenPixelRadius < minPixel * 0.5 && node.getLevel() > UNCONDITIONAL_VISIBLE_LEVEL) {
+            continue;
+          }
+        }
+      }
+
       accumulated += np;
       visibleNodes.push(node);
 
@@ -199,22 +223,20 @@ export class VisibilitySystem {
 
       if (!node.children || node.children.length === 0) continue;
 
-      const nodeLevel = node.getLevel();
-
       for (let i = 0; i < node.children.length; i++) {
         const child = node.children[i];
         if (child.numPoints === 0) continue;
 
-        const sphere = child.boundingSphere;
-        if (!sphere || sphere.radius <= 0) continue;
+        const childSphere = child.boundingSphere;
+        if (!childSphere || childSphere.radius <= 0) continue;
 
-        _tmpVec.copy(sphere.center);
+        _tmpVec.copy(childSphere.center);
         const dist = position.distanceTo(_tmpVec);
 
         if (dist > this.maxVisibleDistance) continue;
 
-        if (dist > sphere.radius) {
-          const screenPixelRadius = sphere.radius * projNumerator / dist;
+        if (dist > childSphere.radius) {
+          const screenPixelRadius = childSphere.radius * projNumerator / dist;
 
           if (screenPixelRadius < minPixel && child.getLevel() > UNCONDITIONAL_VISIBLE_LEVEL) {
             continue;
