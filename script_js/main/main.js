@@ -769,35 +769,12 @@ class App {
         if (hasGeo) {
           const views = ['N','E','S','W','NE','SE','SW','NW'];
           const vi = this.camera.viewIndex;
-          const bench = this.renderer.getBench();
-          let streamHtml = '';
-          if (this.cloud && this.cloud.octreeGeometry && this.cloud.lru) {
-            const loading = this.cloud.visibilitySystem.numNodesLoading;
-            const loaded = this.cloud.lru.items.size;
-            streamHtml = `<span style="font-size:0.65rem;color:#58a6ff">Streaming: ${loaded} nodes loaded`;
-            if (loading > 0) streamHtml += `, <b>${loading}</b> loading`;
-            streamHtml += '</span><br/>';
-          }
-          let batchHtml = '';
-          if (this.renderer.batchCapacity) {
-            const capK = Math.floor(this.renderer.batchCapacity / 1000);
-            batchHtml = `<span style="font-size:0.65rem;color:#3fb950">GPU: ${capK}k batch capacity</span><br/>`;
-          }
           const camLabel = this.camera.activeMode === 'fps'
-            ? `Drone · Speed: <b>${this.camera.fpsSpeed.toFixed(0)}</b>`
-            : `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b>`;
-          const p = this.renderer.getProfile();
+            ? `Drone`
+            : `${views[vi] || vi}`;
           this._hudEl.innerHTML =
-            `<b>Nuvola</b> 2.5D Viewer<br/>` +
-            camLabel + `<br/>` +
-            `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
-            streamHtml +
-            batchHtml +
-            `<span style="font-size:0.65rem;color:#8b949e">CPU: <b>${p.cpuMs.toFixed(1)}</b>ms` +
-            `  Points: <b>${p.pointMs.toFixed(1)}</b>` +
-            `  Light: <b>${p.lightMs.toFixed(1)}</b>` +
-            `  Sel: <b>${p.selectMs.toFixed(1)}</b>` +
-            `  Reb: <b>${p.rebuildMs.toFixed(1)}</b></span>`;
+            `<b>${camLabel}</b> · ${this._fps.toFixed(0)} FPS<br/>` +
+            `${this.cloud.count.toLocaleString()} points`;
         }
       }
     } catch (err) {

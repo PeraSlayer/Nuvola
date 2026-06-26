@@ -63,71 +63,21 @@ export class UIController {
     $('btn-rot-left').onclick  = () => { a.camera.rotateLeft();  if (a.cloud) a._fitView(); };
     $('btn-rot-right').onclick = () => { a.camera.rotateRight(); if (a.cloud) a._fitView(); };
 
-    $('rot-offset').oninput = (e) => {
-      a.camera.setViewOffset(+e.target.value);
-      $('rot-offset-val').textContent = a.camera.viewOffsetDeg + '°';
-      a.camera.markDirty();
-    };
-    $('rot-offset').onchange = () => {
-      if (a.cloud) a._fitView();
-      $('zoom-slider').value = a.camera.zoom;
-      $('zoom-val').textContent = a.camera.zoom.toFixed(1);
-    };
-
-     if ($('rot-x')) {
-      $('rot-x').oninput = (e) => {
-        a.camera.rotationXDeg = +e.target.value;
-        $('rot-x-val').textContent = a.camera.rotationXDeg + '°';
-        a.camera.markDirty();
-      };
-    }
-
-    if ($('rot-y')) {
-      $('rot-y').oninput = (e) => {
-        a.camera.rotationYDeg = +e.target.value;
-        $('rot-y-val').textContent = a.camera.rotationYDeg + '°';
-        a.camera.markDirty();
-      };
-    }
-
     a._updateViewButtons();
-
-    $('chk-8dir').onchange = (e) => {
-      a.camera.eightDir = e.target.checked;
-      a.camera.setView(a.camera.viewIndex);
-      a._updateViewButtons();
-      if (a.cloud) a._fitView();
-    };
 
     document.querySelectorAll('.snap-btn').forEach(btn => {
       btn.onclick = () => {
         a.snapToView(btn.dataset.view);
-        if ($('rot-x')) $('rot-x').value = a.camera.rotationXDeg;
-        if ($('rot-x-val')) $('rot-x-val').textContent = a.camera.rotationXDeg + '°';
-        if ($('rot-y')) $('rot-y').value = a.camera.rotationYDeg;
-        if ($('rot-y-val')) $('rot-y-val').textContent = a.camera.rotationYDeg + '°';
         $('zoom-slider').value = a.camera.zoom;
         $('zoom-val').textContent = a.camera.zoom.toFixed(1);
       };
     });
-
-    $('chk-smooth-rot').onchange = (e) => { a.camera.smoothRot = e.target.checked; };
 
     $('btn-reset').onclick = () => {
       a.camera.reset();
       if (a.cloud) a._fitView();
       $('zoom-slider').value = a.camera.zoom;
       $('zoom-val').textContent = a.camera.zoom.toFixed(1);
-      $('rot-offset').value = a.camera.viewOffsetDeg;
-      $('rot-offset-val').textContent = a.camera.viewOffsetDeg + '°';
-      if ($('rot-x')) {
-        $('rot-x').value = a.camera.rotationXDeg;
-        $('rot-x-val').textContent = a.camera.rotationXDeg + '°';
-      }
-      if ($('rot-y')) {
-        $('rot-y').value = a.camera.rotationYDeg;
-        $('rot-y-val').textContent = a.camera.rotationYDeg + '°';
-      }
     };
 
     // --- Color mode buttons ------------------------------------------------
@@ -157,41 +107,6 @@ export class UIController {
     $('light-amb').oninput = (e) => { a.lightAmb = +e.target.value/100; $('light-amb-val').textContent = a.lightAmb.toFixed(2); a.camera.markDirty(); };
     $('chk-shading').onchange = (e) => { a.shading = e.target.checked; a.camera.markDirty(); };
 
-    // --- Point Decimation --------------------------------------------------
-    $('chk-range-decimation').onchange = (e) => { a.enableRangeDecimation = e.target.checked; a.camera.markDirty(); };
-    $('min-detail-points').oninput = (e) => { a.minPointsForDetail = +e.target.value; $('min-detail-val').textContent = (a.minPointsForDetail/1000).toFixed(0) + 'k'; a.camera.markDirty(); };
-    $('max-dist-ratio').oninput = (e) => { a.maxDistanceRatio = +e.target.value; $('max-dist-ratio-val').textContent = a.maxDistanceRatio.toFixed(2); a.camera.markDirty(); };
-
-    // --- Point Budget (Potree LOD) -----------------------------------------
-    $('chk-auto-budget').onchange = (e) => {
-      a._autoScaleBudget = e.target.checked;
-      if (a.cloud) {
-        const autoBudget = a._autoScaleBudget
-          ? Math.floor(a.renderer.batchCapacity * 0.6)
-          : a._pointBudget;
-        a.cloud.pointBudget = autoBudget;
-      }
-      a.camera.markDirty();
-    };
-    $('point-budget').oninput = (e) => {
-      const val = +e.target.value;
-      a._pointBudget = val;
-      $('chk-auto-budget').checked = false;
-      a._autoScaleBudget = false;
-      if (a.cloud) a.cloud.pointBudget = val;
-      const label = val >= 1e6 ? (val / 1e6).toFixed(1) + 'M' : (val / 1000).toFixed(0) + 'k';
-      $('point-budget-val').textContent = label;
-      a.camera.markDirty();
-    };
-    $('max-visible-dist').oninput = (e) => {
-      const val = +e.target.value;
-      if (a.cloud) {
-        a.cloud.maxVisibleDistance = val >= 4999 ? Infinity : val;
-      }
-      $('max-visible-dist-val').textContent = val >= 4999 ? '∞' : val + 'm';
-      a.camera.markDirty();
-    };
-
     // --- Measurement -------------------------------------------------------
     $('btn-measure').onclick = () => {
       const on = a.measurement.toggle();
@@ -216,22 +131,7 @@ export class UIController {
     });
   }
 
-  /** Update the stats panel with current FPS, draw count, and total points. */
+  /** Update the stats panel (removed from UI, kept for compatibility) */
   updateStats(fps, lodCount, totalCount) {
-    const r = this.app.renderer;
-    const memMB = r ? r.getMemoryMB() : '—';
-    const vramMB = r ? r.detectedVRAM_MB : '—';
-    const batchCap = r ? (r.batchCapacity / 1000).toFixed(0) + 'k' : '—';
-    const lruMB = this.app.cloud?.lru ? (this.app.cloud.lru.gpuBytes / (1024 * 1024)).toFixed(1) : '0';
-    const lruMaxMB = this.app.cloud?.lru ? (this.app.cloud.lru.maxGPUBytes / (1024 * 1024)).toFixed(0) : '—';
-
-    document.getElementById('stats-info').innerHTML =
-      `Points: <b>${totalCount.toLocaleString()}</b><br/>` +
-      `Rendering: <b>${lodCount.toLocaleString()}</b><br/>` +
-      `FPS: <b>${fps.toFixed(0)}</b><br/>` +
-      `GPU Mem: <b>${memMB} MB</b> (est.)<br/>` +
-      `VRAM: <b>${vramMB} MB</b> detected<br/>` +
-      `Batch cap: <b>${batchCap}</b> points<br/>` +
-      `LRU: <b>${lruMB} / ${lruMaxMB} MB</b>`;
   }
 }
