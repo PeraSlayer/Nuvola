@@ -80,10 +80,14 @@ export class Camera {
       [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
     ];
 
-    // Pre-allocated arrays for getUniforms (reused each frame, avoids allocation)
     this._uRes = new Float32Array(2);
     this._uPan = new Float32Array(2);
     this._uCenter = new Float32Array(3);
+
+    this._cachedUniforms = null;
+    this._cachedW = 0;
+    this._cachedH = 0;
+    this._uniformsDirty = true;
   }
 
   get viewOffsetRad() {
@@ -95,6 +99,9 @@ export class Camera {
   get refCenter() { return this._refCenter; }
 
   getUniforms(w, h, cloud) {
+    if (!this._uniformsDirty && this._cachedUniforms && this._cachedW === w && this._cachedH === h) {
+      return this._cachedUniforms;
+    }
     const center = cloud ? cloud.center : this._cloudCenter;
     const zMin = cloud ? cloud.zMin - center[2] : 0;
     const zMax = cloud ? cloud.zMax - center[2] : 1;
@@ -106,7 +113,7 @@ export class Camera {
     this._uRes[0] = w; this._uRes[1] = h;
     this._uPan[0] = this.panX; this._uPan[1] = this.panY;
     this._uCenter[0] = center[0]; this._uCenter[1] = center[1]; this._uCenter[2] = center[2];
-    return {
+    this._cachedUniforms = {
       u_resolution: this._uRes,
       u_pan: this._uPan,
       u_zoom: this.zoom,
@@ -124,6 +131,10 @@ export class Camera {
       u_spacing: spacing,
       u_cameraMode: 0,
     };
+    this._cachedW = w;
+    this._cachedH = h;
+    this._uniformsDirty = false;
+    return this._cachedUniforms;
   }
 
   fitToBounds(cloud, w, h, angle) {
@@ -268,6 +279,7 @@ export class Camera {
 
   markDirty() {
     this._dirty = true;
+    this._uniformsDirty = true;
   }
 
   consumeDirty() {

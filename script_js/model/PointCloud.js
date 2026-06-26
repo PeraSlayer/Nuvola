@@ -1,4 +1,4 @@
-import { collectVisibleLeaves, flattenTree, extractCamParams } from './Octree.js';
+import { collectVisibleLeaves, extractCamParams } from './Octree.js';
 import { VisibilitySystem } from '../potree/VisibilitySystem.js';
 import { LRUCache } from '../potree/LRUCache.js';
 
@@ -55,6 +55,7 @@ export class PointCloud {
 
     this._collectBuf = this.octreeGeometry ? null : new Uint32Array(MAX_BUDGET);
     this._leafRefs = [];
+    this._loadedNodes = [];
     this.renderer = null;
     this._needsRender = false;
   }
@@ -70,6 +71,7 @@ export class PointCloud {
     this.lru = null;
     this._collectBuf = null;
     this._leafRefs = null;
+    this._loadedNodes = null;
     this._pickGrid = null;
     this._pickOffsets = null;
     this._pickCounts = null;
@@ -106,9 +108,7 @@ export class PointCloud {
     const buf = this._collectBuf;
 
     if (total <= MAX_BUDGET) {
-      const off = { current: 0 };
-      flattenTree(this.octree, buf, off);
-      return { indices: null, count: off.current };
+      return { indices: null, count: this.count };
     }
 
     const cp = extractCamParams(camera);
@@ -159,7 +159,8 @@ export class PointCloud {
       }
     }
 
-    const loadedNodes = [];
+    const loadedNodes = this._loadedNodes;
+    loadedNodes.length = 0;
     for (let i = 0; i < result.visibleNodes.length; i++) {
       const node = result.visibleNodes[i];
       if (node._batchOffset != null && node.loaded) {
@@ -185,7 +186,10 @@ export class PointCloud {
 
       node.onLoad((n) => {
         if (this.renderer) this.renderer.uploadNode(n);
-        if (this.lru) this.lru.touch(n);
+        if (this.lru) {
+          this.lru.touch(n);
+          this.lru.updateGPUUsage(n);
+        }
         if (this.visibilitySystem) this.visibilitySystem.invalidateCache();
         this._needsRender = true;
       });

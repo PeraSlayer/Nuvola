@@ -29,6 +29,11 @@ export class CameraController {
     this._uRes = new Float32Array(2);
     this._uPan = new Float32Array(2);
     this._uCenter = new Float32Array(3);
+
+    this._cachedFPSUniforms = null;
+    this._cachedFPSW = 0;
+    this._cachedFPSH = 0;
+    this._fpsUniformsDirty = true;
   }
 
   get fpsSpeed() {
@@ -119,6 +124,7 @@ export class CameraController {
 
   markDirty() {
     this._dirty = true;
+    this._fpsUniformsDirty = true;
   }
 
   consumeDirty() {
@@ -141,11 +147,13 @@ export class CameraController {
       this.activeMode = 'isometric';
     }
     this._dirty = true;
+    this._fpsUniformsDirty = true;
   }
 
   setMode(mode) {
     this.activeMode = mode;
     this._dirty = true;
+    this._fpsUniformsDirty = true;
   }
 
   getViewMatrix() {
@@ -235,6 +243,9 @@ export class CameraController {
   }
 
   _getUniformsFPS(w, h, cloud) {
+    if (!this._fpsUniformsDirty && this._cachedFPSUniforms && this._cachedFPSW === w && this._cachedFPSH === h) {
+      return this._cachedFPSUniforms;
+    }
     this.update();
     const center = cloud ? cloud.center : [0, 0, 0];
     const zMin = cloud ? cloud.zMin - center[2] : 0;
@@ -244,7 +255,7 @@ export class CameraController {
     this._uRes[0] = w; this._uRes[1] = h;
     this._uCenter[0] = center[0]; this._uCenter[1] = center[1]; this._uCenter[2] = center[2];
 
-    return {
+    this._cachedFPSUniforms = {
       u_resolution: this._uRes,
       u_pan: this._uPan,
       u_zoom: 1,
@@ -264,6 +275,10 @@ export class CameraController {
       u_projMatrix: this.perspectiveCamera.projectionMatrix.elements,
       u_spacing: spacing,
     };
+    this._cachedFPSW = w;
+    this._cachedFPSH = h;
+    this._fpsUniformsDirty = false;
+    return this._cachedFPSUniforms;
   }
 
   get panX() { return this.isometricCamera.panX; }

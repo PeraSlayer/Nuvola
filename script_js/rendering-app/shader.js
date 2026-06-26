@@ -79,16 +79,16 @@ export const POINT_VERTEX_SHADER = `#version 300 es
          float viewDist = -viewPos.z;
          dNorm = clamp((viewDist - 0.1) / 9999.9, 0.0, 1.0);
 
-         if (u_pointSizeType == 0) {
-           gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
-         } else {
-           float slope = tan(u_fov * 0.5);
-           float projFactor = 0.5 * u_screenHeight / (slope * max(viewDist, 0.1));
-           float spacing = u_spacing > 0.0 ? u_spacing : 1.0;
-           float fillSize = spacing * projFactor;
-           float ps = u_pointSize * 0.25 * fillSize;
-            gl_PointSize = clamp(ps, 1.0, 8.0);
-         }
+          if (u_pointSizeType == 0) {
+            gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
+          } else {
+            float slope = tan(u_fov * 0.5);
+            float projFactor = 0.5 * u_screenHeight / (slope * max(viewDist, 0.1));
+            float spacing = u_spacing > 0.0 ? u_spacing : 1.0;
+            float fillSize = spacing * projFactor;
+            float ps = u_pointSize * 0.5 * fillSize;
+            gl_PointSize = clamp(ps, 1.0, 12.0);
+          }
        } else {
         float cosX = cos(u_rotX), sinX = sin(u_rotX);
         float y1 = local.y * cosX - local.z * sinX;
@@ -111,11 +111,13 @@ export const POINT_VERTEX_SHADER = `#version 300 es
         dNorm = (dKey - u_depthMin) / max(u_depthMax - u_depthMin, 1e-6);
         gl_Position = vec4(sx * invW - 1.0, 1.0 - sy * invH, dNorm * 2.0 - 1.0, 1.0);
 
-        if (u_pointSizeType == 0) {
+         if (u_pointSizeType == 0) {
            gl_PointSize = clamp(u_pointSize, 1.0, 50.0);
          } else {
-           gl_PointSize = clamp(u_pointSize * max(u_zoom * 0.3, 0.5), 1.0, 50.0);
-          }
+           float spacing = u_spacing > 0.0 ? u_spacing : 1.0;
+           float ps = spacing * u_zoom * u_pointSize * 0.5;
+           gl_PointSize = clamp(ps, 1.0, 12.0);
+         }
        }
 
       v_pointSize = gl_PointSize;
@@ -148,9 +150,8 @@ export const POINT_FRAGMENT_SHADER = `#version 300 es
   layout(location = 1) out vec4 outDepth;
   void main() {
     float dist = length(gl_PointCoord - 0.5) * 2.0;
-    float edge = max(fwidth(dist), 1.0 / v_pointSize);
-    float alpha = (1.0 - smoothstep(1.0 - edge * 2.0, 1.0, dist)) * v_opacity;
-    outColor = vec4(v_color, alpha);
+    if (dist > 1.0) discard;
+    outColor = vec4(v_color * v_opacity, 1.0);
     outDepth = vec4(v_depth, v_height, 0.0, 1.0);
   }`;
 

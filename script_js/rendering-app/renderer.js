@@ -125,7 +125,6 @@ export class Renderer {
     this._batchVboInt = null;
     this._batchVboClass = null;
     this._batchVboOpacity = null;
-    this._batchIndexVbo = null;
     this._batchIndexBuf = null;
     this._batchTotalPoints = 0;
     this._batchDrawStart = 0;
@@ -136,6 +135,7 @@ export class Renderer {
     this._batchVisibleNodeIds = [];
     this._batchVisibleOffsets = [];
     this._batchVisibleCounts = [];
+    this._batchRuns = [];
 
     this._initShaders();
     this._initBuffers();
@@ -315,12 +315,6 @@ export class Renderer {
     gl.enableVertexAttribArray(this.attrOpacity);
     gl.vertexAttribPointer(this.attrOpacity, 1, gl.FLOAT, false, 0, 0);
 
-    this._batchIndexVbo = this._requireResource(gl.createBuffer(), 'batch index');
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._batchIndexVbo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cap * 4, gl.DYNAMIC_DRAW);
-
-    this._batchIndexBuf = new Uint32Array(cap);
-
     gl.bindVertexArray(null);
 
     this._batchNextOffset = 0;
@@ -332,6 +326,7 @@ export class Renderer {
     this._batchVisibleNodeIds.length = 0;
     this._batchVisibleOffsets.length = 0;
     this._batchVisibleCounts.length = 0;
+    this._batchRuns.length = 0;
   }
 
   _initFBO() {
@@ -589,7 +584,6 @@ export class Renderer {
     if (this._batchVboInt) { gl.deleteBuffer(this._batchVboInt); this._batchVboInt = null; }
     if (this._batchVboClass) { gl.deleteBuffer(this._batchVboClass); this._batchVboClass = null; }
     if (this._batchVboOpacity) { gl.deleteBuffer(this._batchVboOpacity); this._batchVboOpacity = null; }
-    if (this._batchIndexVbo) { gl.deleteBuffer(this._batchIndexVbo); this._batchIndexVbo = null; }
     this._batchIndexBuf = null;
     this._batchTotalPoints = 0;
     this._batchDrawStart = 0;
@@ -600,6 +594,7 @@ export class Renderer {
     this._batchVisibleNodeIds.length = 0;
     this._batchVisibleOffsets.length = 0;
     this._batchVisibleCounts.length = 0;
+    this._batchRuns.length = 0;
   }
 
   _isBatchIndexCurrent(visibleNodes) {
@@ -619,11 +614,14 @@ export class Renderer {
   }
 
   _rebuildBatchIndex(visibleNodes) {
-    const gl = this.gl;
     let total = 0;
     let contiguous = true;
     let expected = -1;
     let drawStart = 0;
+    const runs = this._batchRuns;
+    runs.length = 0;
+    let runStart = -1;
+    let runEnd = 0;
 
     for (let i = 0; i < visibleNodes.length; i++) {
       const n = visibleNodes[i];
@@ -633,28 +631,20 @@ export class Renderer {
         drawStart = n._batchOffset;
       }
       if (n._batchOffset !== expected) contiguous = false;
+
+      if (runStart < 0 || n._batchOffset !== runEnd) {
+        if (runStart >= 0) runs.push(runStart, runEnd - runStart);
+        runStart = n._batchOffset;
+      }
+      runEnd = n._batchOffset + n._batchCount;
       expected = n._batchOffset + n._batchCount;
       total += n._batchCount;
     }
+    if (runStart >= 0) runs.push(runStart, runEnd - runStart);
 
     this._batchTotalPoints = total;
     this._batchDrawStart = drawStart;
     this._batchContiguous = contiguous;
-
-    if (!contiguous && total > 0) {
-      const idx = this._batchIndexBuf;
-      let off = 0;
-      for (let i = 0; i < visibleNodes.length; i++) {
-        const n = visibleNodes[i];
-        if (n._batchOffset == null || n._batchCount <= 0) continue;
-        const base = n._batchOffset;
-        const count = n._batchCount;
-        for (let j = 0; j < count; j++) idx[off + j] = base + j;
-        off += count;
-      }
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._batchIndexVbo);
-      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, idx.subarray(0, total));
-    }
 
     this._batchVisibleNodeIds.length = visibleNodes.length;
     this._batchVisibleOffsets.length = visibleNodes.length;
@@ -718,7 +708,7 @@ export class Renderer {
   }
 
   getProfile() {
-    return this._profile || { selectMs: 0, rebuildMs: 0, cpuMs: 0, depthMs: 0, colorMs: 0, totalMs: 0 };
+    return this._profile || { selectMs: 0, rebuildMs: 0, cpuMs: 0, pointMs: 0, lightMs: 0, totalMs: 0 };
   }
 
   _createCloudVAO(cloud, indexBuffer = null) {
@@ -871,47 +861,8 @@ export class Renderer {
     const pointSize = opts.pointSize != null ? opts.pointSize : DEFAULT_POINT_SIZE;
     const pointSizeType = opts.pointSizeType != null ? opts.pointSizeType : 1;
 
+    let rebuildMs = 0;
     if (hasPoints) {
-      gl.useProgram(this.progDepth);
-      this._applyDepthUniforms(camera, cloud);
-
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.depthMask(true);
-      gl.colorMask(false, false, false, false);
-
-      let rebuildMs = 0;
-      if (nodes && this._batchVao) {
-        if (!this._isBatchIndexCurrent(nodes)) {
-          const rt0 = performance.now();
-          this._rebuildBatchIndex(nodes);
-          rebuildMs = performance.now() - rt0;
-        }
-        if (this._batchTotalPoints > 0) {
-          gl.bindVertexArray(this._batchVao);
-          if (this._batchContiguous) {
-            gl.drawArrays(gl.POINTS, this._batchDrawStart, this._batchTotalPoints);
-          } else {
-            gl.drawElements(gl.POINTS, this._batchTotalPoints, gl.UNSIGNED_INT, 0);
-          }
-        }
-      } else if (hasIndices) {
-        if (!this._dynamicIndexVao) {
-          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-          return 0;
-        }
-        gl.bindVertexArray(this._dynamicIndexVao);
-        this._uploadDynamicIndices(drawCall.indices, drawCount);
-        gl.drawElements(gl.POINTS, drawCount, gl.UNSIGNED_INT, 0);
-      } else {
-        if (!this._cloudVao) {
-          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-          return 0;
-        }
-        gl.bindVertexArray(this._cloudVao);
-        gl.drawArrays(gl.POINTS, 0, drawCount);
-      }
-
       gl.useProgram(this.progPoint);
 
       this._applyCameraUniforms(camera, cloud);
@@ -930,26 +881,45 @@ export class Renderer {
         this._pointUniforms.uniform3fv(this.uPoint.cloudScale, 'point.cloudScale', this._cloudScaleBuf);
       }
 
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
       gl.colorMask(true, true, true, true);
-      gl.depthMask(false);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.disable(gl.BLEND);
 
-      if (nodes && this._batchVao && this._batchTotalPoints > 0) {
-        gl.bindVertexArray(this._batchVao);
-        if (this._batchContiguous) {
-          gl.drawArrays(gl.POINTS, this._batchDrawStart, this._batchTotalPoints);
-        } else {
-          gl.drawElements(gl.POINTS, this._batchTotalPoints, gl.UNSIGNED_INT, 0);
+      if (nodes && this._batchVao) {
+        if (!this._isBatchIndexCurrent(nodes)) {
+          const rt0 = performance.now();
+          this._rebuildBatchIndex(nodes);
+          rebuildMs = performance.now() - rt0;
+        }
+        if (this._batchTotalPoints > 0) {
+          gl.bindVertexArray(this._batchVao);
+          if (this._batchContiguous) {
+            gl.drawArrays(gl.POINTS, this._batchDrawStart, this._batchTotalPoints);
+          } else {
+            const runs = this._batchRuns;
+            for (let r = 0; r < runs.length; r += 2) {
+              gl.drawArrays(gl.POINTS, runs[r], runs[r + 1]);
+            }
+          }
         }
       } else if (hasIndices) {
+        if (!this._dynamicIndexVao) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return 0;
+        }
+        gl.bindVertexArray(this._dynamicIndexVao);
+        this._uploadDynamicIndices(drawCall.indices, drawCount);
         gl.drawElements(gl.POINTS, drawCount, gl.UNSIGNED_INT, 0);
       } else {
+        if (!this._cloudVao) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return 0;
+        }
+        gl.bindVertexArray(this._cloudVao);
         gl.drawArrays(gl.POINTS, 0, drawCount);
       }
-
-      gl.disable(gl.BLEND);
-      gl.depthMask(true);
     }
     const t2 = performance.now();
 
@@ -979,8 +949,8 @@ export class Renderer {
       selectMs: drawCall.profiling?.selectNodesMs || 0,
       rebuildMs: rebuildMs,
       cpuMs: t1 - t0,
-      depthMs: t2 - t1,
-      colorMs: t3 - t2,
+      pointMs: t2 - t1,
+      lightMs: t3 - t2,
       totalMs: t3 - t0,
     };
 

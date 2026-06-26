@@ -29,6 +29,7 @@ import { CameraController } from '../potree/CameraController.js';
 import { CloudTransform }  from '../model/transform.js';
 import { Gizmo }           from '../view/gizmo.js';
 import { Renderer }        from '../rendering-app/renderer.js';
+import { ThreeOverlayRenderer } from '../rendering-app/ThreeOverlayRenderer.js';
 
 import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
@@ -138,6 +139,11 @@ class App {
     document.getElementById('main').appendChild(this.overlayCanvas);
     this.overlayCtx = this.overlayCanvas.getContext('2d');
 
+    this.threeCanvas = document.createElement('canvas');
+    this.threeCanvas.style.cssText = 'position:absolute;inset:0;pointer-events:none;width:100%;height:100%';
+    document.getElementById('main').appendChild(this.threeCanvas);
+    this.threeOverlay = new ThreeOverlayRenderer(this.threeCanvas);
+
     this.plyLoader = new PLYLoader();
     this.lasLoader = new LASLoader();
     this.xyzLoader = new XYZLoader();
@@ -172,7 +178,7 @@ class App {
     this._lastFpsTime = performance.now();
     this._lastTime    = performance.now();
 
-    this._profile = { selectMs: 0, rebuildMs: 0, cpuMs: 0, depthMs: 0, colorMs: 0, totalMs: 0 };
+    this._profile = { selectMs: 0, rebuildMs: 0, cpuMs: 0, pointMs: 0, lightMs: 0, totalMs: 0 };
     this._dragging  = false;
     this._dragButton = -1;
     this._lastMouse = [0, 0];
@@ -340,6 +346,11 @@ class App {
     this.overlayCanvas.height = this.renderer.height;
     this.overlayCanvas.style.width  = w + 'px';
     this.overlayCanvas.style.height = h + 'px';
+    this.threeCanvas.width  = this.renderer.width;
+    this.threeCanvas.height = this.renderer.height;
+    this.threeCanvas.style.width  = w + 'px';
+    this.threeCanvas.style.height = h + 'px';
+    this.threeOverlay.setSize(this.renderer.width, this.renderer.height);
     if (this.cloud) this._fitView();
     this.camera.markDirty();
   }
@@ -721,7 +732,7 @@ class App {
           this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
         }
         if (this.measurement.points.length) {
-          this.measurement.drawOverlay(this.overlayCtx, this.cloud, this.camera, this.renderer);
+          this.measurement.updateMeshes(this.cloud, this.threeOverlay);
         }
         if (this.gizmo.mode !== 'none') {
             const ctx = this.overlayCtx;
@@ -735,6 +746,8 @@ class App {
             ctx.fillText('Gizmo: ' + this.gizmo.getModeLabel(), 20, 30);
             ctx.restore();
           }
+
+        this.threeOverlay.render(this.camera);
       }
 
       this._frames++;
@@ -764,20 +777,18 @@ class App {
           const camLabel = this.camera.activeMode === 'fps'
             ? `Drone · Speed: <b>${this.camera.fpsSpeed.toFixed(0)}</b>`
             : `View: <b>${views[vi] || vi}</b>  Zoom: <b>${this.camera.zoom.toFixed(1)}×</b>`;
+          const p = this.renderer.getProfile();
           this._hudEl.innerHTML =
             `<b>Nuvola</b> 2.5D Viewer<br/>` +
             camLabel + `<br/>` +
             `FPS: <b>${this._fps.toFixed(0)}</b>  Mode: <b>${this.colorMode}</b><br/>` +
             streamHtml +
             batchHtml +
-            threeHtml +
-            this._profile = this.renderer.getProfile();
-            `<span style="font-size:0.65rem;color:#8b949e">CPU: <b>${this._profile.cpuMs.toFixed(1)}</b>ms`
-            + `  Depth: <b>${this._profile.depthMs.toFixed(1)}</b>`
-            + `  Color: <b>${this._profile.colorMs.toFixed(1)}</b>`
-            + `  Sel: <b>${this._profile.selectMs.toFixed(1)}</b>`
-            + `  Reb: <b>${this._profile.rebuildMs.toFixed(1)}</b>`
-            + `</span>`;
+            `<span style="font-size:0.65rem;color:#8b949e">CPU: <b>${p.cpuMs.toFixed(1)}</b>ms` +
+            `  Points: <b>${p.pointMs.toFixed(1)}</b>` +
+            `  Light: <b>${p.lightMs.toFixed(1)}</b>` +
+            `  Sel: <b>${p.selectMs.toFixed(1)}</b>` +
+            `  Reb: <b>${p.rebuildMs.toFixed(1)}</b></span>`;
         }
       }
     } catch (err) {
@@ -811,6 +822,7 @@ class App {
       this._activeWorker = null;
     }
     this.renderer.dispose();
+    this.threeOverlay.dispose();
     if (this.cloud) {
       this.cloud.dispose();
       this.cloud = null;
@@ -819,6 +831,10 @@ class App {
     if (this.overlayCanvas && this.overlayCanvas.parentNode) {
       this.overlayCanvas.parentNode.removeChild(this.overlayCanvas);
       this.overlayCanvas = null;
+    }
+    if (this.threeCanvas && this.threeCanvas.parentNode) {
+      this.threeCanvas.parentNode.removeChild(this.threeCanvas);
+      this.threeCanvas = null;
     }
     this.plyLoader.dispose();
     this.lasLoader.dispose();

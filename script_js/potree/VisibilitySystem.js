@@ -24,6 +24,13 @@ export class VisibilitySystem {
     this._cachedResult = null;
     this._cacheFrameCount = 0;
     this._projCache = new Map();
+    this._cp = {
+      cx: 0, cy: 0, cz: 0,
+      cosX: 1, sinX: 0,
+      cosY: 1, sinY: 0,
+      c: 1, s: 0,
+      zoom: 1, panX: 0, panY: 0,
+    };
   }
 
   get numNodesLoading() {
@@ -72,7 +79,7 @@ export class VisibilitySystem {
 
     const result = isFps
       ? this.collectFPSNodes(root, camera, viewportH, b)
-      : this.collectOverviewNodes(root, camera, b);
+      : this.collectOverviewNodes(root, camera, b, viewportW, viewportH);
 
     this._cachedResult = {
       visibleNodes: result.visibleNodes,
@@ -85,7 +92,7 @@ export class VisibilitySystem {
     return result;
   }
 
-  collectOverviewNodes(root, camera, budget) {
+  collectOverviewNodes(root, camera, budget, viewportW, viewportH) {
     const cp = this._extractCameraParams(camera);
     const minPixel = MIN_PIXEL_ISOMETRIC;
     const visibleNodes = [];
@@ -100,8 +107,9 @@ export class VisibilitySystem {
       const node = this._queue.pop().node;
       const np = node.getNumPoints();
       if (np === 0) continue;
+      if (accumulated + np > budget) break;
 
-      const projected = this._computeProjectedNodeIsometric(node, cp);
+      const projected = this._computeProjectedNodeIsometric(node, cp, viewportW, viewportH);
       const screenSize = Math.max(projected.width, projected.height);
 
       if (screenSize >= minPixel && node.hasChildren) {
@@ -112,7 +120,7 @@ export class VisibilitySystem {
           for (let i = 0; i < node.children.length; i++) {
             const child = node.children[i];
             if (child.numPoints === 0) continue;
-            const childProjected = this._computeProjectedNodeIsometric(child, cp);
+            const childProjected = this._computeProjectedNodeIsometric(child, cp, viewportW, viewportH);
             const childScreenSize = Math.max(childProjected.width, childProjected.height);
             this._projCache.set(child, childScreenSize);
             this._queue.push(child, childScreenSize || minPixel);
@@ -121,7 +129,6 @@ export class VisibilitySystem {
         }
       }
 
-      if (accumulated + np > budget) break;
       accumulated += np;
       visibleNodes.push(node);
 
@@ -218,13 +225,12 @@ export class VisibilitySystem {
   }
 
   _extractCameraParams(camera) {
-    const cp = {
-      cx: 0, cy: 0, cz: 0,
-      cosX: 1, sinX: 0,
-      cosY: 1, sinY: 0,
-      c: 1, s: 0,
-      zoom: 1, panX: 0, panY: 0,
-    };
+    const cp = this._cp;
+    cp.cx = 0; cp.cy = 0; cp.cz = 0;
+    cp.cosX = 1; cp.sinX = 0;
+    cp.cosY = 1; cp.sinY = 0;
+    cp.c = 1; cp.s = 0;
+    cp.zoom = 1; cp.panX = 0; cp.panY = 0;
 
     if (camera._cloudCenter) {
       cp.cx = camera._cloudCenter[0];
@@ -313,8 +319,8 @@ export class VisibilitySystem {
     return true;
   }
 
-  _computeProjectedNodeIsometric(node, cp) {
-    if (!this._isNodeVisibleIsometric(node, cp, Infinity, Infinity)) {
+  _computeProjectedNodeIsometric(node, cp, w, h) {
+    if (!this._isNodeVisibleIsometric(node, cp, w, h)) {
       return { width: 0, height: 0 };
     }
     return {
