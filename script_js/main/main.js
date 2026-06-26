@@ -175,6 +175,7 @@ class App {
     this.pointSize = 3.0;
     this.pointSizeType = 1;
     this.sketchfabOpacity = 0;
+    this.dreamy = 0;
 
     this._fps = 0;
     this._frames = 0;
@@ -645,6 +646,7 @@ class App {
         pointSize: this.pointSize,
         pointSizeType: this.pointSizeType,
         sketchfabOpacity: this.sketchfabOpacity,
+        dreamy: this.dreamy,
       });
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
@@ -728,6 +730,7 @@ class App {
           pointSize: this.pointSize,
           pointSizeType: this.pointSizeType,
           sketchfabOpacity: this.sketchfabOpacity,
+          dreamy: this.dreamy,
         });
 
         if (this.cloud && this.cloud.lru) {

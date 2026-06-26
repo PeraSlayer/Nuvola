@@ -105,6 +105,11 @@ export class UIController {
       $('sketch-opacity-val').textContent = +e.target.value === 0 ? 'Off' : (+e.target.value * 100).toFixed(0) + '%';
       a.camera.markDirty();
     };
+    $('dreamy').oninput = (e) => {
+      a.dreamy = +e.target.value;
+      $('dreamy-val').textContent = +e.target.value === 0 ? 'Off' : (+e.target.value * 100).toFixed(0) + '%';
+      a.camera.markDirty();
+    };
 
     // --- Lighting ----------------------------------------------------------
     $('light-az').oninput  = (e) => { a.lightAz  = +e.target.value; $('light-az-val').textContent  = a.lightAz  + '°'; a.camera.markDirty(); };

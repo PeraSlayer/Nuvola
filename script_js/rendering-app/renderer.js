@@ -244,6 +244,7 @@ export class Renderer {
       screenHeight: gl.getUniformLocation(this.progPoint, 'u_screenHeight'),
       fov: gl.getUniformLocation(this.progPoint, 'u_fov'),
       sketchfabOpacity: gl.getUniformLocation(this.progPoint, 'u_sketchfabOpacity'),
+      dreamy: gl.getUniformLocation(this.progPoint, 'u_dreamy'),
     };
 
     this.uLight = {
@@ -905,6 +906,7 @@ export class Renderer {
     const pointSize = opts.pointSize != null ? opts.pointSize : DEFAULT_POINT_SIZE;
     const pointSizeType = opts.pointSizeType != null ? opts.pointSizeType : 1;
     const sketchfabOpacity = opts.sketchfabOpacity != null ? opts.sketchfabOpacity : 0;
+    const dreamy = opts.dreamy != null ? opts.dreamy : 0;
 
     let rebuildMs = 0;
     if (hasPoints) {
@@ -915,6 +917,7 @@ export class Renderer {
       this._pointUniforms.uniform1f(this.uPoint.pointSize, 'point.pointSize', pointSize);
       this._pointUniforms.uniform1i(this.uPoint.pointSizeType, 'point.pointSizeType', pointSizeType);
       this._pointUniforms.uniform1f(this.uPoint.sketchfabOpacity, 'point.sketchfabOpacity', sketchfabOpacity);
+      this._pointUniforms.uniform1f(this.uPoint.dreamy, 'point.dreamy', dreamy);
 
       const useCloudTransform = opts.useCloudTransform ? 1 : 0;
       this._pointUniforms.uniform1i(this.uPoint.useCloudTransform, 'point.useCloudTransform', useCloudTransform);
@@ -932,7 +935,7 @@ export class Renderer {
       gl.depthMask(true);
       gl.colorMask(true, true, true, true);
       
-      if (sketchfabOpacity > 0) {
+      if (sketchfabOpacity > 0 || dreamy > 0) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       } else {
