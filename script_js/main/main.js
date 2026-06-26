@@ -174,6 +174,7 @@ class App {
     this._autoScaleBudget = true;
     this.pointSize = 3.0;
     this.pointSizeType = 1;
+    this.sketchfabOpacity = 0;
 
     this._fps = 0;
     this._frames = 0;
@@ -643,6 +644,7 @@ class App {
         cloudScale: this.cloudTransform.scale,
         pointSize: this.pointSize,
         pointSizeType: this.pointSizeType,
+        sketchfabOpacity: this.sketchfabOpacity,
       });
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
@@ -725,6 +727,7 @@ class App {
           cloudScale: this.cloudTransform.scale,
           pointSize: this.pointSize,
           pointSizeType: this.pointSizeType,
+          sketchfabOpacity: this.sketchfabOpacity,
         });
 
         if (this.cloud && this.cloud.lru) {

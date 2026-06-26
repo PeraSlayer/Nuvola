@@ -27,6 +27,7 @@ export const POINT_VERTEX_SHADER = `#version 300 es
   uniform float u_screenWidth;
   uniform float u_screenHeight;
   uniform float u_fov;
+  uniform float u_sketchfabOpacity;
   out vec3 v_color;
   out float v_depth;
   out float v_height;
@@ -146,12 +147,22 @@ export const POINT_FRAGMENT_SHADER = `#version 300 es
   in float v_height;
   in float v_pointSize;
   in float v_opacity;
+  uniform float u_sketchfabOpacity;
   layout(location = 0) out vec4 outColor;
   layout(location = 1) out vec4 outDepth;
   void main() {
-    float dist = length(gl_PointCoord - 0.5) * 2.0;
+    vec2 coord = gl_PointCoord - 0.5;
+    float dist = length(coord) * 2.0;
     if (dist > 1.0) discard;
-    outColor = vec4(v_color * v_opacity, 1.0);
+    
+    float alpha = v_opacity;
+    
+    if (u_sketchfabOpacity > 0.0) {
+      float softEdge = 1.0 - smoothstep(0.6, 1.0, dist);
+      alpha *= softEdge * u_sketchfabOpacity;
+    }
+    
+    outColor = vec4(v_color * alpha, alpha);
     outDepth = vec4(v_depth, v_height, 0.0, 1.0);
   }`;
 
