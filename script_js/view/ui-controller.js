@@ -117,6 +117,27 @@ export class UIController {
     $('light-amb').oninput = (e) => { a.lightAmb = +e.target.value/100; $('light-amb-val').textContent = a.lightAmb.toFixed(2); a.camera.markDirty(); };
     $('chk-shading').onchange = (e) => { a.shading = e.target.checked; a.camera.markDirty(); };
 
+    // --- Background -------------------------------------------------------
+    $('chk-sky').onchange = (e) => { a.skyEnabled = e.target.checked; a.camera.markDirty(); };
+    $('sky-color-top').oninput = (e) => {
+      const hex = e.target.value;
+      a.skyColorTop = [
+        parseInt(hex.substr(1, 2), 16) / 255,
+        parseInt(hex.substr(3, 2), 16) / 255,
+        parseInt(hex.substr(5, 2), 16) / 255,
+      ];
+      a.camera.markDirty();
+    };
+    $('sky-color-bottom').oninput = (e) => {
+      const hex = e.target.value;
+      a.skyColorBottom = [
+        parseInt(hex.substr(1, 2), 16) / 255,
+        parseInt(hex.substr(3, 2), 16) / 255,
+        parseInt(hex.substr(5, 2), 16) / 255,
+      ];
+      a.camera.markDirty();
+    };
+
     // --- Measurement -------------------------------------------------------
     $('btn-measure').onclick = () => {
       const on = a.measurement.toggle();

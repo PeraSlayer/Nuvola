@@ -244,11 +244,19 @@ export const LIGHT_FRAGMENT_SHADER = `#version 300 es
   uniform vec3 u_lightDir;
   uniform float u_ambient;
   uniform bool u_shading;
+  uniform float u_skyEnabled;
+  uniform vec3 u_skyColorTop;
+  uniform vec3 u_skyColorBottom;
   out vec4 fragColor;
   void main() {
     vec4 colorSample = texture(u_colorTex, v_uv);
     if (colorSample.a < 0.5) {
-      fragColor = vec4(0.13, 0.15, 0.18, 1.0);
+      if (u_skyEnabled > 0.5) {
+        vec3 skyColor = mix(u_skyColorBottom, u_skyColorTop, v_uv.y);
+        fragColor = vec4(skyColor, 1.0);
+      } else {
+        fragColor = vec4(0.13, 0.15, 0.18, 1.0);
+      }
       return;
     }
     vec3 finalColor = colorSample.rgb;

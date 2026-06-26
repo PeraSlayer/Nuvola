@@ -254,6 +254,9 @@ export class Renderer {
       lightDir: gl.getUniformLocation(this.progLight, 'u_lightDir'),
       ambient: gl.getUniformLocation(this.progLight, 'u_ambient'),
       shading: gl.getUniformLocation(this.progLight, 'u_shading'),
+      skyEnabled: gl.getUniformLocation(this.progLight, 'u_skyEnabled'),
+      skyColorTop: gl.getUniformLocation(this.progLight, 'u_skyColorTop'),
+      skyColorBottom: gl.getUniformLocation(this.progLight, 'u_skyColorBottom'),
     };
 
     this._pointUniforms = new UniformGuard(gl);
@@ -997,6 +1000,13 @@ export class Renderer {
     this._lightUniforms.uniform3fv(this.uLight.lightDir, 'light.lightDir', lightDir);
     this._lightUniforms.uniform1f(this.uLight.ambient, 'light.ambient', ambient);
     this._lightUniforms.uniform1i(this.uLight.shading, 'light.shading', shading ? 1 : 0);
+    
+    const skyEnabled = opts.skyEnabled ? 1 : 0;
+    const skyColorTop = opts.skyColorTop || [0.4, 0.6, 0.9];
+    const skyColorBottom = opts.skyColorBottom || [0.7, 0.85, 1.0];
+    this._lightUniforms.uniform1f(this.uLight.skyEnabled, 'light.skyEnabled', skyEnabled);
+    this._lightUniforms.uniform3fv(this.uLight.skyColorTop, 'light.skyColorTop', skyColorTop);
+    this._lightUniforms.uniform3fv(this.uLight.skyColorBottom, 'light.skyColorBottom', skyColorBottom);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     const t3 = performance.now();

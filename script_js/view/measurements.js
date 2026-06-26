@@ -17,6 +17,8 @@ interazione sopra renderer, camera e cloud.
 ===============================================================================
 */
 
+import * as THREE from 'three';
+
 // =============================================================================
 // MeasurementTool
 //
@@ -31,6 +33,9 @@ export class MeasurementTool {
     this.active = false;
     this.points = [];   // indices into point cloud
     this.markers = [];  // screen positions for overlay
+    
+    this._markerMeshes = [];
+    this._lineMesh = null;
   }
 
   toggle() {
@@ -42,6 +47,8 @@ export class MeasurementTool {
   clear() {
     this.points = [];
     this.markers = [];
+    this._markerMeshes = [];
+    this._lineMesh = null;
   }
 
   /** Handle click; returns true once both points have been captured. */
@@ -69,7 +76,36 @@ export class MeasurementTool {
     return { horizontal, vertical, euclidean, p0: [x0,y0,z0], p1: [x1,y1,z1] };
   }
 
-  /** Draw the markers and the line connecting them. */
+  /** Update Three.js meshes for markers and line. */
+  updateMeshes(cloud, overlayRenderer) {
+    if (!cloud || !overlayRenderer) return;
+    
+    overlayRenderer.clear();
+    
+    if (this.points.length === 0) return;
+    
+    const p = cloud.positions;
+    
+    for (let i = 0; i < this.points.length; i++) {
+      const idx = this.points[i];
+      const x = p[idx*3], y = p[idx*3+1], z = p[idx*3+2];
+      const worldPos = new THREE.Vector3(x, y, z);
+      overlayRenderer.addMarker(`measure_${i}`, worldPos, 3);
+    }
+    
+    if (this.points.length >= 2) {
+      const [a, b] = this.points;
+      const ax = p[a*3], ay = p[a*3+1], az = p[a*3+2];
+      const bx = p[b*3], by = p[b*3+1], bz = p[b*3+2];
+      const linePoints = [
+        new THREE.Vector3(ax, ay, az),
+        new THREE.Vector3(bx, by, bz),
+      ];
+      overlayRenderer.addLine('measure_line', linePoints);
+    }
+  }
+
+  /** Draw the markers and the line connecting them (legacy 2D canvas fallback). */
   drawOverlay(ctx, cloud, camera, renderer) {
     if (!this.points.length) return;
     const p = cloud.positions;

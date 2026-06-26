@@ -176,6 +176,9 @@ class App {
     this.pointSizeType = 1;
     this.sketchfabOpacity = 0;
     this.dreamy = 0;
+    this.skyEnabled = true;
+    this.skyColorTop = [0.4, 0.6, 0.9];
+    this.skyColorBottom = [0.7, 0.85, 1.0];
 
     this._fps = 0;
     this._frames = 0;
@@ -647,6 +650,9 @@ class App {
         pointSizeType: this.pointSizeType,
         sketchfabOpacity: this.sketchfabOpacity,
         dreamy: this.dreamy,
+        skyEnabled: this.skyEnabled,
+        skyColorTop: this.skyColorTop,
+        skyColorBottom: this.skyColorBottom,
       });
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
@@ -731,6 +737,9 @@ class App {
           pointSizeType: this.pointSizeType,
           sketchfabOpacity: this.sketchfabOpacity,
           dreamy: this.dreamy,
+          skyEnabled: this.skyEnabled,
+          skyColorTop: this.skyColorTop,
+          skyColorBottom: this.skyColorBottom,
         });
 
         if (this.cloud && this.cloud.lru) {

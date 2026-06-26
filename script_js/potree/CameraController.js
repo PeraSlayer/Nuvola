@@ -37,11 +37,11 @@ export class CameraController {
   }
 
   get fpsSpeed() {
-    return this._spherical.radius * 0.2;
+    return this._spherical.radius * 0.05;
   }
 
   set fpsSpeed(v) {
-    this._spherical.radius = v / 0.2;
+    this._spherical.radius = v / 0.05;
     this._dirty = true;
   }
 
@@ -68,7 +68,7 @@ export class CameraController {
     _v3.normalize();
     _v3b.crossVectors(_v3, _up).normalize();
     _v3c.crossVectors(_v3b, _v3).normalize();
-    const scale = this._spherical.radius * 0.002;
+    const scale = this._spherical.radius * 0.0005;
     this._target.addScaledVector(_v3b, dx * scale);
     this._target.addScaledVector(_v3c, dy * scale);
     this._dirty = true;

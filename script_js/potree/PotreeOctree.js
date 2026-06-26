@@ -97,6 +97,8 @@ export class OctreeGeometryNode {
     }
     this._oneTimeDisposeHandlers.length = 0;
     this.geometryData = null;
+    this.loaded = false;
+    this._loadCallbacks.length = 0;
     this._disposed = true;
   }
 
