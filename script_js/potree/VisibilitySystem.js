@@ -6,10 +6,10 @@ const _tmpVec = new THREE.Vector3();
 const _proj = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
 const _corners = new Array(8);
 for (let i = 0; i < 8; i++) _corners[i] = new THREE.Vector3();
-const VIEWPORT_CULL_MARGIN_PX = 20;
+const VIEWPORT_CULL_MARGIN_PX = 10;
 const UNCONDITIONAL_VISIBLE_LEVEL = 2;
 const MIN_PIXEL_ISOMETRIC = 250;
-const MIN_PIXEL_FPS = 250;
+const MIN_PIXEL_FPS = 300;
 
 export class VisibilitySystem {
   constructor() {
