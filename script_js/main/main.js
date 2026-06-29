@@ -1020,9 +1020,6 @@ class App {
     const streamScale = 0.3;
     this.canvas.width = this._originalCanvasWidth * streamScale;
     this.canvas.height = this._originalCanvasHeight * streamScale;
-    const streamScale = 0.3;
-    this.canvas.width = this._originalCanvasWidth * streamScale;
-    this.canvas.height = this._originalCanvasHeight * streamScale;
     
     // Inizializza encoder video
     await this._initVideoEncoder();
