@@ -216,6 +216,11 @@ class App {
     this._dragging  = false;
     this._dragButton = -1;
     this._tilingMode = false;
+    
+    // Streaming
+    this._streamWs = null;
+    this._streaming = false;
+    this._streamInterval = null;
     this._lastMouse = [0, 0];
     this._minimapFrame = 0;
     this._hudEl = document.getElementById('hud');
@@ -929,6 +934,7 @@ class App {
     this._abortController.abort();
     this.fpsControls.dispose();
     this.vrMode.dispose();
+    this.stopStreaming();
     if (this._activeWorker) {
       this._activeWorker.terminate();
       this._activeWorker = null;
@@ -983,6 +989,124 @@ class App {
       } catch (err) {
         alert('Impossibile avviare la modalità VR: ' + err.message);
       }
+    }
+  }
+
+  startStreaming() {
+    if (this._streaming) return;
+    
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}`;
+    
+    console.log('[Stream] Connessione a:', wsUrl);
+    this._streamWs = new WebSocket(wsUrl);
+    this._streamWs.binaryType = 'arraybuffer';
+    
+    this._streamWs.onopen = () => {
+      console.log('[Stream] ✓ Connesso al server');
+      this._streaming = true;
+      
+      // Invia frame a 30 FPS
+      this._streamInterval = setInterval(() => {
+        this._sendFrame();
+      }, 33);
+      
+      const btn = document.getElementById('btn-stream');
+      if (btn) {
+        btn.textContent = 'Stop Streaming';
+        btn.classList.add('active');
+      }
+      
+      const info = document.getElementById('stream-info');
+      if (info) {
+        info.textContent = 'Streaming attivo ✓';
+        info.style.color = '#34c759';
+      }
+    };
+    
+    this._streamWs.onmessage = (event) => {
+      // Ricevi tracking dal Quest
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'tracking') {
+          // Aggiorna camera dal tracking
+          if (this.camera && data.position && data.rotation) {
+            // Il tracking viene applicato come offset alla camera corrente
+            // Per ora usiamo i valori direttamente
+            console.log('[Stream] Tracking ricevuto:', data);
+          }
+        }
+      } catch (error) {
+        console.error('[Stream] Errore parsing messaggio:', error);
+      }
+    };
+    
+    this._streamWs.onclose = () => {
+      console.log('[Stream] Connessione chiusa');
+      this.stopStreaming();
+    };
+    
+    this._streamWs.onerror = (error) => {
+      console.error('[Stream] Errore WebSocket:', error);
+      const info = document.getElementById('stream-info');
+      if (info) {
+        info.textContent = 'Errore di connessione';
+        info.style.color = '#ff3b30';
+      }
+    };
+  }
+
+  stopStreaming() {
+    if (!this._streaming) return;
+    
+    this._streaming = false;
+    
+    if (this._streamInterval) {
+      clearInterval(this._streamInterval);
+      this._streamInterval = null;
+    }
+    
+    if (this._streamWs) {
+      this._streamWs.close();
+      this._streamWs = null;
+    }
+    
+    const btn = document.getElementById('btn-stream');
+    if (btn) {
+      btn.textContent = 'Start Streaming';
+      btn.classList.remove('active');
+    }
+    
+    const info = document.getElementById('stream-info');
+    if (info) {
+      info.textContent = 'Stream fermato';
+      info.style.color = '';
+    }
+  }
+
+  _sendFrame() {
+    if (!this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) return;
+    
+    try {
+      // Cattura il frame dal canvas WebGL
+      const dataUrl = this.canvas.toDataURL('image/jpeg', 0.7);
+      
+      // Converti data URL in blob
+      const byteString = atob(dataUrl.split(',')[1]);
+      const mimeString = dataUrl.split(',')[0].split(':')[1].split(';')[0];
+      const ab = new ArrayBuffer(byteString.length);
+      const ia = new Uint8Array(ab);
+      
+      for (let i = 0; i < byteString.length; i++) {
+        ia[i] = byteString.charCodeAt(i);
+      }
+      
+      const blob = new Blob([ab], { type: mimeString });
+      
+      // Invia come binary
+      this._streamWs.send(blob);
+    } catch (error) {
+      console.error('[Stream] Errore invio frame:', error);
     }
   }
 }
