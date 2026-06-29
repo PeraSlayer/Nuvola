@@ -150,10 +150,16 @@
     let deviceOrientation = { alpha: 0, beta: 0, gamma: 0 };
     let useDeviceOrientation = false;
     
-    // Resize canvas
+    // Resize canvas con risoluzione ridotta per performance
     function resizeCanvas() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      // Usa risoluzione ridotta (75%) per migliorare performance
+      const scale = 0.75;
+      canvas.width = window.innerWidth * scale;
+      canvas.height = window.innerHeight * scale;
+      
+      // Mantieni dimensione visuale con CSS
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
     }
     
     window.addEventListener('resize', resizeCanvas);
@@ -184,8 +190,11 @@
         const img = new Image();
         
         img.onload = () => {
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          URL.revokeObjectURL(url);
+          // Usa requestAnimationFrame per rendering smooth
+          requestAnimationFrame(() => {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            URL.revokeObjectURL(url);
+          });
           
           // Aggiorna FPS
           frameCount++;
@@ -363,12 +372,12 @@
     // Avvia connessione automatica
     connect();
     
-    // Invia tracking periodicamente
+    // Invia tracking periodicamente (ridotto a 10 Hz per performance)
     setInterval(() => {
       if (isConnected) {
         sendTrackingData();
       }
-    }, 50); // 20 Hz
+    }, 100); // 10 Hz
   </script>
 </body>
 </html>

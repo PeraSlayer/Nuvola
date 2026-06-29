@@ -221,6 +221,11 @@ class App {
     this._streamWs = null;
     this._streaming = false;
     this._streamInterval = null;
+    this._frameCount = 0;
+    this._streamQuality = 0.4; // Qualità JPEG iniziale (40%)
+    this._streamFPS = 15; // FPS iniziale
+    this._lastFrameTime = 0;
+    this._frameTimes = []; // Per calcolare media
     this._lastMouse = [0, 0];
     this._minimapFrame = 0;
     this._hudEl = document.getElementById('hud');
@@ -1002,14 +1007,23 @@ class App {
     this._streamWs = new WebSocket(wsUrl);
     this._streamWs.binaryType = 'arraybuffer';
     
+    // Salva dimensioni originali del canvas
+    this._originalCanvasWidth = this.canvas.width;
+    this._originalCanvasHeight = this.canvas.height;
+    
+    // Riduci risoluzione canvas durante streaming (50%)
+    const streamScale = 0.5;
+    this.canvas.width = this._originalCanvasWidth * streamScale;
+    this.canvas.height = this._originalCanvasHeight * streamScale;
+    
     this._streamWs.onopen = () => {
       console.log('[Stream] ✓ Connesso al server');
       this._streaming = true;
       
-      // Invia frame a 30 FPS
+      // Invia frame a 15 FPS (ridotto per performance)
       this._streamInterval = setInterval(() => {
         this._sendFrame();
-      }, 33);
+      }, 66); // ~15 FPS
       
       const btn = document.getElementById('btn-stream');
       if (btn) {
@@ -1019,7 +1033,7 @@ class App {
       
       const info = document.getElementById('stream-info');
       if (info) {
-        info.textContent = 'Streaming attivo ✓';
+        info.textContent = 'Streaming attivo ✓ (15 FPS, qualità adattiva)';
         info.style.color = '#34c759';
       }
     };
@@ -1122,6 +1136,13 @@ class App {
       this._streamWs = null;
     }
     
+    // Ripristina risoluzione originale del canvas
+    if (this._originalCanvasWidth && this._originalCanvasHeight) {
+      this.canvas.width = this._originalCanvasWidth;
+      this.canvas.height = this._originalCanvasHeight;
+      this.camera.markDirty(); // Forza re-render
+    }
+    
     const btn = document.getElementById('btn-stream');
     if (btn) {
       btn.textContent = 'Start Streaming';
@@ -1133,14 +1154,18 @@ class App {
       info.textContent = 'Stream fermato';
       info.style.color = '';
     }
+    
+    console.log('[Stream] Streaming fermato, canvas ripristinato');
   }
 
   _sendFrame() {
     if (!this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) return;
     
     try {
-      // Cattura il frame dal canvas WebGL
-      const dataUrl = this.canvas.toDataURL('image/jpeg', 0.7);
+      const startTime = performance.now();
+      
+      // Cattura il frame dal canvas WebGL con qualità adattiva
+      const dataUrl = this.canvas.toDataURL('image/jpeg', this._streamQuality);
       
       // Converti data URL in blob
       const byteString = atob(dataUrl.split(',')[1]);
@@ -1153,9 +1178,37 @@ class App {
       }
       
       const blob = new Blob([ab], { type: mimeString });
+      const sizeKB = (blob.size / 1024).toFixed(1);
       
       // Invia come binary
       this._streamWs.send(blob);
+      
+      const endTime = performance.now();
+      const captureTime = endTime - startTime;
+      
+      // Salva tempo di cattura
+      this._frameTimes.push(captureTime);
+      if (this._frameTimes.length > 10) {
+        this._frameTimes.shift();
+      }
+      
+      // Calcola media tempi
+      const avgTime = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
+      
+      // Adaptive quality: riduci se troppo lento
+      if (avgTime > 50 && this._streamQuality > 0.2) {
+        this._streamQuality = Math.max(0.2, this._streamQuality - 0.05);
+        console.log(`[Stream] Qualità ridotta a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
+      } else if (avgTime < 20 && this._streamQuality < 0.6) {
+        this._streamQuality = Math.min(0.6, this._streamQuality + 0.05);
+        console.log(`[Stream] Qualità aumentata a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
+      }
+      
+      // Log performance ogni 10 frame
+      this._frameCount++;
+      if (this._frameCount % 10 === 0) {
+        console.log(`[Stream] Frame: ${sizeKB}KB, quality: ${(this._streamQuality * 100).toFixed(0)}%, avg: ${avgTime.toFixed(1)}ms`);
+      }
     } catch (error) {
       console.error('[Stream] Errore invio frame:', error);
     }
