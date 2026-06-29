@@ -250,7 +250,9 @@ export class Camera {
   }
 
   rotateVertical(delta) {
-    this.rotationXDeg += delta;
+    // Limita la rotazione verticale a +/- 89 gradi per evitare l'inversione
+    const newRot = this.rotationXDeg + delta;
+    this.rotationXDeg = Math.max(-89, Math.min(89, newRot));
     this.markDirty();
   }
 

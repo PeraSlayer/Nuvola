@@ -21,10 +21,10 @@
     <div class="panel">
       <h2>Load Data</h2>
       <button class="primary full" id="btn-load">Open Point Cloud</button>
-      <input type="file" id="file-input" accept=".ply,.gz,.ply.gz,.las,.laz,.xyz,.txt,.pts,.rxp" />
+      <input type="file" id="file-input" accept=".ply,.gz,.ply.gz,.las,.laz,.xyz,.txt,.pts,.rxp,.e57" />
       <div class="row mt-2"><input type="text" id="potree-url" placeholder="Potree metadata.json URL" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:5px 8px;font-size:0.75rem" /></div>
       <button class="full" id="btn-load-potree" style="margin-top:4px">Load Potree Dataset</button>
-      <p class="stat mt-2" id="file-info">No file loaded<br/>PLY, LAS, LAZ, XYZ</p>
+      <p class="stat mt-2" id="file-info">No file loaded<br/>PLY, LAS, LAZ, XYZ, E57</p>
     </div>
     
     <div class="panel">
@@ -91,12 +91,18 @@
       <button id="btn-clear-measure" class="full mt-1">Clear Measurement</button>
     </div>
 
+    <div class="panel">
+      <h2>VR Mode</h2>
+      <button id="btn-vr" class="primary full">Enter VR</button>
+      <p class="stat mt-2" id="vr-info">Requires WebXR-compatible VR headset</p>
+    </div>
+
   </aside>
 
   <main id="main">
     <button id="toggle-sidebar">☰</button>
     <canvas id="glcanvas"></canvas>
-    <div id="drop-overlay"><p><strong>Drop to open</strong>PLY, LAS, LAZ, XYZ</p></div>
+    <div id="drop-overlay"><p><strong>Drop to open</strong>PLY, LAS, LAZ, XYZ, E57</p></div>
     <div id="hud"></div>
     <div id="minimap"><canvas id="minimap-canvas" width="140" height="140"></canvas></div>
     <div id="measure-info"></div>

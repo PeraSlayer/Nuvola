@@ -21,9 +21,11 @@ visualizzazione WebGL.
 
 import { PLYLoader }       from '../file_loader/ply-loader.js';
 import { LASLoader }       from '../file_loader/las-loader.js';
+import { LASTilingLoader } from '../file_loader/las-tiling-loader.js';
 import { decompressLAZ }   from '../file_loader/laz-decompressor.js';
 import { XYZLoader }       from '../file_loader/xyz-loader.js';
 import { RXPLoader }       from '../file_loader/rxp-loader.js';
+import { E57Loader }        from '../file_loader/e57-loader.js';
 import { PointCloud }      from '../model/PointCloud.js';
 import { CameraController } from '../potree/CameraController.js';
 import { CloudTransform }  from '../model/transform.js';
@@ -35,6 +37,7 @@ import { MeasurementTool } from '../view/measurements.js';
 import { MiniMap }         from '../view/minimap.js';
 import { UIController }    from '../view/ui-controller.js';
 import { FPSControls }     from '../view/fps-controls.js?v=3';
+import { VRMode }          from '../view/vr-mode.js';
 import * as THREE from 'three';
 import { PotreeLoader }    from '../potree/PotreeLoader.js';
 import { bindInput }        from './input.js';
@@ -49,6 +52,21 @@ import { bindInput }        from './input.js';
  */
 async function _readLASFile(file, format) {
   if (format === 'LAZ') {
+    // Per file LAZ, verifica la dimensione prima di caricare
+    // Il limite pratico è circa 500MB compressi (che diventano ~1.5GB decompressi)
+    const MAX_LAZ_SIZE = 500 * 1024 * 1024; // 500MB
+    
+    if (file.size > MAX_LAZ_SIZE) {
+      throw new Error(
+        `File LAZ troppo grande (${(file.size / 1024 / 1024).toFixed(1)}MB). ` +
+        `Limite: ${MAX_LAZ_SIZE / 1024 / 1024}MB compressi.\n\n` +
+        `Opzioni:\n` +
+        `1. Decomprimi offline: laszip -i ${file.name} -o ${file.name.replace('.laz', '.las')}\n` +
+        `2. Converti in formato streaming con las2potree\n` +
+        `3. Usa un file LAS non compresso`
+      );
+    }
+    
     const buf = await file.arrayBuffer();
     try {
       return await decompressLAZ(buf);
@@ -56,8 +74,14 @@ async function _readLASFile(file, format) {
       throw new Error('LAZ decompression failed: ' + err.message);
     }
   }
-  // LAS non compresso: restituisci il File object per chunked reading
-  return { file, type: 'las-file' };
+  // LAS non compresso
+  if (file.size >= 2 * 1024 * 1024 * 1024) {
+    // File grande (>=2GB): usa chunked reading
+    return { file, type: 'las-file' };
+  } else {
+    // File piccolo (<2GB): carica in memoria
+    return await file.arrayBuffer();
+  }
 }
 
 const APP_OCTREE_WORKER = `
@@ -148,8 +172,10 @@ class App {
 
     this.plyLoader = new PLYLoader();
     this.lasLoader = new LASLoader();
+    this.lasTilingLoader = new LASTilingLoader();
     this.xyzLoader = new XYZLoader();
     this.rxpLoader = new RXPLoader();
+    this.e57Loader = new E57Loader();
 
     this.renderer    = new Renderer(this.canvas);
     this.camera      = new CameraController();
@@ -159,6 +185,7 @@ class App {
     this.ui          = new UIController(this);
     this.cloudTransform = new CloudTransform();
     this.gizmo         = new Gizmo();
+    this.vrMode        = new VRMode(this);
 
     this.cloud        = null;
     this.colorMode    = 'rgb';
@@ -188,6 +215,7 @@ class App {
     this._profile = { selectMs: 0, rebuildMs: 0, cpuMs: 0, pointMs: 0, lightMs: 0, totalMs: 0 };
     this._dragging  = false;
     this._dragButton = -1;
+    this._tilingMode = false;
     this._lastMouse = [0, 0];
     this._minimapFrame = 0;
     this._hudEl = document.getElementById('hud');
@@ -500,8 +528,12 @@ class App {
       loader = this.rxpLoader;
       format = 'RXP';
       readMethod = RXPLoader.readFile;
+    } else if (E57Loader.isE57File(file)) {
+      loader = this.e57Loader;
+      format = 'E57';
+      readMethod = (f) => f;
     } else {
-      alert(`Unsupported format.\n\nSupported: .ply, .ply.gz, .las, .laz, .xyz, .txt, .pts, .rxp`);
+      alert(`Unsupported format.\n\nSupported: .ply, .ply.gz, .las, .laz, .xyz, .txt, .pts, .rxp, .e57`);
       return;
     }
 
@@ -524,8 +556,7 @@ class App {
 
     let buf, data, procResult;
     try {
-      // LAS/LAZ files can be very large; skip size check for them (chunked reading handles large files)
-      if (format !== 'LAS' && format !== 'LAZ' && file.size > 4 * 1024 * 1024 * 1024) {
+      if (format !== 'LAS' && format !== 'LAZ' && format !== 'E57' && file.size > 4 * 1024 * 1024 * 1024) {
         throw new Error(`File troppo grande (${(file.size / 1024 / 1024).toFixed(1)}MB). Limite: 4GB.`);
       }
 
@@ -535,9 +566,88 @@ class App {
       if (format === 'PLY') {
         data = await loader.load(buf);
       } else if (format === 'LAS' || format === 'LAZ') {
-        data = await loader.load(buf, format === 'LAZ');
+        // Per file LAS grandi (>2GB), usa il tiling loader
+        if (format === 'LAS' && file.size >= 2 * 1024 * 1024 * 1024) {
+          document.getElementById('loading-text').textContent = `Initializing tiling system…`;
+          await this.lasTilingLoader.init(file, (progress) => {
+            document.getElementById('loading-text').textContent = 
+              `Initializing tiling system… ${(progress * 100).toFixed(0)}%`;
+          });
+          
+          // Carica i chunk iniziali
+          document.getElementById('loading-text').textContent = `Loading chunks…`;
+          const visibleChunks = this.lasTilingLoader.getVisibleChunks(this.camera, this.renderer.width, this.renderer.height);
+          await this.lasTilingLoader.loadVisibleChunks(visibleChunks, (progress) => {
+            document.getElementById('loading-text').textContent = 
+              `Loading chunks… ${(progress * 100).toFixed(0)}%`;
+          });
+          
+          // Combina i chunk in un unico dataset per ora
+          // In futuro si può fare un rendering multi-chunk
+          const loadedChunks = this.lasTilingLoader.getLoadedChunks();
+          let totalCount = 0;
+          let totalPositions = 0;
+          let totalColors = 0;
+          let totalIntensity = 0;
+          
+          for (const chunk of loadedChunks) {
+            totalCount += chunk.count;
+            totalPositions += chunk.positions.length;
+            totalColors += chunk.colors.length;
+            totalIntensity += chunk.intensity.length;
+          }
+          
+          const positions = new Float32Array(totalPositions);
+          const colors = new Uint8Array(totalColors);
+          const intensity = new Float32Array(totalIntensity);
+          
+          let posOffset = 0;
+          let colOffset = 0;
+          let intOffset = 0;
+          let minI = Infinity, maxI = -Infinity;
+          
+          for (const chunk of loadedChunks) {
+            positions.set(chunk.positions, posOffset);
+            colors.set(chunk.colors, colOffset);
+            intensity.set(chunk.intensity, intOffset);
+            
+            posOffset += chunk.positions.length;
+            colOffset += chunk.colors.length;
+            intOffset += chunk.intensity.length;
+            
+            if (chunk.minI < minI) minI = chunk.minI;
+            if (chunk.maxI > maxI) maxI = chunk.maxI;
+          }
+          
+          data = {
+            positions: positions,
+            colors: colors,
+            intensity: intensity,
+            count: totalCount,
+            hasColor: true,
+            hasIntensity: true
+          };
+          
+          this._tilingMode = true;
+        } else {
+          // LASLoader.load() si aspetta:
+          // - Per LAS piccolo: ArrayBuffer
+          // - Per LAS grande: { file, type: 'las-file' }
+          // - Per LAZ: il buffer è già decompresso, quindi isCompressed=false
+          data = await loader.load(buf, false);
+          this._tilingMode = false;
+        }
       } else if (format === 'RXP') {
         data = await loader.load(buf);
+      } else if (format === 'E57') {
+        if (file.size > 2 * 1024 * 1024 * 1024) {
+          data = await loader.loadLargeFile(buf);
+        } else {
+          if (buf instanceof File || buf instanceof Blob) {
+            buf = await buf.arrayBuffer();
+          }
+          data = await loader.load(buf);
+        }
       } else {
         data = await loader.load(buf);
       }
@@ -818,6 +928,7 @@ class App {
     this._disposed = true;
     this._abortController.abort();
     this.fpsControls.dispose();
+    this.vrMode.dispose();
     if (this._activeWorker) {
       this._activeWorker.terminate();
       this._activeWorker = null;
@@ -841,6 +952,7 @@ class App {
     this.lasLoader.dispose();
     this.xyzLoader.dispose();
     this.rxpLoader.dispose();
+    this.e57Loader.dispose();
     if (this._potreeLoader) {
       this._potreeLoader.dispose();
       this._potreeLoader = null;
@@ -857,11 +969,41 @@ class App {
     val.textContent = label;
     if (autoChk) autoChk.checked = this._autoScaleBudget;
   }
+
+  async toggleVR() {
+    if (this.vrMode.isActive) {
+      await this.vrMode.endSession();
+      document.getElementById('btn-vr').textContent = 'Enter VR';
+      document.getElementById('btn-vr').classList.remove('active');
+    } else {
+      try {
+        await this.vrMode.startSession();
+        document.getElementById('btn-vr').textContent = 'Exit VR';
+        document.getElementById('btn-vr').classList.add('active');
+      } catch (err) {
+        alert('Impossibile avviare la modalità VR: ' + err.message);
+      }
+    }
+  }
 }
 
 try {
   window.app = new App();
   window.__NUVOLA_READY = true;
+  
+  // Carica automaticamente points.ply all'avvio
+  (async () => {
+    try {
+      const response = await fetch('./points.ply');
+      if (response.ok) {
+        const blob = await response.blob();
+        const file = new File([blob], 'points.ply', { type: 'application/octet-stream' });
+        await window.app.loadFile(file);
+      }
+    } catch (err) {
+      console.warn('Auto-load points.ply failed:', err.message);
+    }
+  })();
 } catch (err) {
   console.error(err);
   document.body.innerHTML =

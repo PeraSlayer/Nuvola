@@ -31,7 +31,13 @@ const LAS_WORKER_SOURCE = `
 
 function parseHeader(dv) {
   const fileSignature = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
-  if (fileSignature !== 'LASF') throw new Error('Not a valid LAS file (signature mismatch)');
+  console.log('[LAS Worker] parseHeader called, buffer size:', dv.byteLength);
+  console.log('[LAS Worker] File signature:', fileSignature);
+  if (fileSignature !== 'LASF') {
+    console.error('[LAS Worker] Signature mismatch! Expected "LASF", got:', fileSignature);
+    console.error('[LAS Worker] First 4 bytes:', dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+    throw new Error('Not a valid LAS file (signature mismatch)');
+  }
   
   const headerSize = dv.getUint16(94, true);
   const majorVersion = dv.getUint8(24);
@@ -43,11 +49,12 @@ function parseHeader(dv) {
   
   // LAS 1.4 uses a 64-bit point count at offset 247
   if ((majorVersion === 1 && minorVersion >= 4) && headerSize >= 375) {
-    if (pointOffset + pointCount * pointRecordLength > dv.byteLength) {
-      const countLow = dv.getUint32(247, true);
-      const countHigh = dv.getUint32(251, true);
-      const count64 = countLow + (countHigh * 0x100000000);
-      if (count64 > 0 && count64 <= 1000000000) pointCount = Number(count64);
+    // Leggi sempre il conteggio 64-bit per LAS 1.4 (è il valore authoritative)
+    const countLow = dv.getUint32(247, true);
+    const countHigh = dv.getUint32(251, true);
+    const count64 = countLow + (countHigh * 0x100000000);
+    if (count64 > 0 && count64 <= 1000000000) {
+      pointCount = Number(count64);
     }
   }
   
@@ -249,18 +256,20 @@ export class LASLoader {
   }
   
   async load(fileRef, isCompressed = false) {
-    if (isCompressed) {
-      // LAZ: decompress first, then parse (legacy method)
-      // fileRef should be an ArrayBuffer in this case
-      return this._loadLegacy(fileRef);
-    }
+    // isCompressed è sempre false ora perché la decompressione LAZ
+    // avviene in _readLASFile() prima di arrivare qui
     
     if (fileRef && fileRef.type === 'las-file') {
+      // File LAS grande (>2GB): chunked reading
       return this._loadChunked(fileRef.file);
     }
     
-    // Legacy: ArrayBuffer input (files < 2GB)
-    return this._loadLegacy(fileRef);
+    if (fileRef instanceof ArrayBuffer || ArrayBuffer.isView(fileRef)) {
+      // Buffer in memoria: parsing completo
+      return this._loadLegacy(fileRef);
+    }
+    
+    throw new Error('Invalid input: expected ArrayBuffer or {file, type} object');
   }
   
   async _loadLegacy(arrayBuffer) {
@@ -282,12 +291,33 @@ export class LASLoader {
     
     try {
       // 1. Read header (first 400 bytes)
+      console.log('[LAS] Loading file:', file.name, 'Size:', file.size, 'bytes');
       const headerBlob = file.slice(0, 400);
       const headerBuf = await headerBlob.arrayBuffer();
+      console.log('[LAS] Header buffer size:', headerBuf.byteLength, 'bytes');
+      
+      // Debug: mostra i primi 4 byte per verificare la signature
+      const headerView = new Uint8Array(headerBuf);
+      const sigBytes = Array.from(headerView.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      const sigText = String.fromCharCode(...headerView.slice(0, 4));
+      console.log('[LAS] First 4 bytes (hex):', sigBytes);
+      console.log('[LAS] First 4 bytes (text):', sigText);
+      
       const headerMsg = await this._sendToWorker(worker, { type: 'parseHeader', buffer: headerBuf }, [headerBuf]);
       const header = headerMsg.header;
+      console.log('[LAS] Header parsed successfully:', header);
       
-      const { pointOffset, pointCount, pointRecordLength, hasColor } = header;
+      const { pointOffset, pointCount, pointRecordLength, hasColor, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ } = header;
+      
+      console.log('[LAS] Point offset:', pointOffset, 'Point count:', pointCount, 'Record length:', pointRecordLength);
+      
+      // Verifica overflow per file molto grandi
+      const totalDataSize = pointCount * pointRecordLength;
+      console.log('[LAS] Total data size:', totalDataSize, 'bytes (', (totalDataSize / 1024 / 1024 / 1024).toFixed(2), 'GB)');
+      
+      if (totalDataSize > Number.MAX_SAFE_INTEGER) {
+        throw new Error('File too large: point count * record length exceeds JavaScript safe integer limit');
+      }
       
       // 2. Pre-allocate output arrays
       const positions = new Float32Array(pointCount * 3);
@@ -297,11 +327,17 @@ export class LASLoader {
       // 3. Read and parse chunks (~256MB per chunk)
       const CHUNK_POINTS = Math.max(1, Math.floor((256 * 1024 * 1024) / pointRecordLength));
       let globalMinI = Infinity, globalMaxI = -Infinity;
+      let actualPoints = 0;
       
       for (let startIdx = 0; startIdx < pointCount; startIdx += CHUNK_POINTS) {
         const numPoints = Math.min(CHUNK_POINTS, pointCount - startIdx);
         const chunkStart = pointOffset + startIdx * pointRecordLength;
-        const chunkEnd = chunkStart + numPoints * pointRecordLength;
+        const chunkEnd = Math.min(chunkStart + numPoints * pointRecordLength, file.size);
+        
+        console.log('[LAS] Processing chunk: startIdx=', startIdx, 'numPoints=', numPoints, 
+                    'chunkStart=', chunkStart, 'chunkEnd=', chunkEnd);
+        
+        if (chunkStart >= file.size) break;
         
         const chunkBlob = file.slice(chunkStart, chunkEnd);
         const chunkBuf = await chunkBlob.arrayBuffer();
@@ -322,22 +358,22 @@ export class LASLoader {
         if (chunkMsg.minI < globalMinI) globalMinI = chunkMsg.minI;
         if (chunkMsg.maxI > globalMaxI) globalMaxI = chunkMsg.maxI;
         
-        // Yield to UI every ~1GB
-        if (startIdx % (CHUNK_POINTS * 4) === 0) {
-          await new Promise(r => setTimeout(r, 0));
-        }
+        actualPoints += chunkMsg.numPoints;
+        
+        // Yield to UI every chunk
+        await new Promise(r => setTimeout(r, 0));
       }
       
       // 4. Normalize intensity
       const iRange = globalMaxI - globalMinI;
-      for (let i = 0; i < pointCount; i++) {
+      for (let i = 0; i < actualPoints; i++) {
         if (iRange > 0) intensity[i] = (intensity[i] - globalMinI) / iRange;
         else intensity[i] = 0.5;
       }
       
-      // 5. Fill missing colors with grayscale
+      // 5. Fill missing colors with grayscale based on intensity
       if (!hasColor) {
-        for (let i = 0; i < pointCount; i++) {
+        for (let i = 0; i < actualPoints; i++) {
           const val = Math.floor(intensity[i] * 255);
           colors[i*3] = val;
           colors[i*3+1] = val;
@@ -348,8 +384,10 @@ export class LASLoader {
       worker.terminate();
       
       return {
-        positions, colors, intensity,
-        count: pointCount,
+        positions: positions.subarray(0, actualPoints * 3),
+        colors: colors.subarray(0, actualPoints * 3),
+        intensity: intensity.subarray(0, actualPoints),
+        count: actualPoints,
         hasColor,
         hasIntensity: true
       };

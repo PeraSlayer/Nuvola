@@ -2,127 +2,170 @@
 ===============================================================================
 File: laz-decompressor.js
 
-Questo modulo prova a convertire dati LAZ compressi in dati LAS leggibili dal
-loader LAS. Carica una build WebAssembly di laszip al primo utilizzo, mantiene
-in cache l'istanza WASM e copia i buffer di input/output tra JavaScript e la
-memoria del modulo WebAssembly.
+Decompressore LAZ basato su laz-perf (WASM). Carica il modulo laz-perf
+dalla cartella tools/laz-perf/ e usa la classe LASZip per decomprimere
+i punti compressi.
 
 Espone decompressLAZ(lazBuffer), una funzione asincrona che riceve un
-ArrayBuffer LAZ e restituisce un ArrayBuffer LAS. Se il decoder non e
-disponibile o la build WASM non espone le funzioni attese, genera errori
-esplicativi con alternative operative.
-
-Il file e quindi un adattatore: consente al flusso principale di trattare i file
-LAZ come LAS dopo una fase preliminare di decompressione.
+ArrayBuffer LAZ e restituisce un ArrayBuffer LAS pronto per il parsing.
 ===============================================================================
 */
 
-/**
- * LAZ decompressor using WASM laszip.
- *
- * Loads laszip.wasm from CDN on first use. Falls back to a descriptive
- * error if the WASM module is unavailable.
- *
- * CDN source: https://unpkg.com/laszip-wasm@1.0.0/dist/laszip.wasm
- */
+const _moduleDir = new URL('./', import.meta.url).pathname;
+const _projectRoot = _moduleDir.replace(/script_js\/file_loader\/$/, '');
+const LAZ_PERF_JS = _projectRoot + 'tools/laz-perf/laz-perf.js';
+const LAZ_PERF_WASM_DIR = _projectRoot + 'tools/laz-perf/';
 
-const LASZIP_WASM_URL = 'https://unpkg.com/laszip-wasm@1.0.0/dist/laszip.wasm';
+let _lazPerfModule = null;
+let _loading = null;
 
-let _wasmInstance = null;
-let _wasmLoading = null;
+async function _loadLazPerf() {
+  if (_lazPerfModule) return _lazPerfModule;
+  if (_loading) return _loading;
 
-async function _loadWasm() {
-  if (_wasmInstance) return _wasmInstance;
-  if (_wasmLoading) return _wasmLoading;
-
-  _wasmLoading = (async () => {
-    try {
-      const response = await fetch(LASZIP_WASM_URL);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const wasmBytes = await response.arrayBuffer();
-      const result = await WebAssembly.instantiate(wasmBytes, {
-        env: {
-          memory: new WebAssembly.Memory({ initial: 256, maximum: 1024 }),
-          emscripten_memcpy: () => {},
-        },
+  _loading = (async () => {
+    if (typeof globalThis.createLazPerf === 'undefined') {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = LAZ_PERF_JS;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error(
+          'Failed to load laz-perf.js from ' + LAZ_PERF_JS + '\n' +
+          'Make sure the file exists in tools/laz-perf/'
+        ));
+        document.head.appendChild(script);
       });
-
-      _wasmInstance = result.instance;
-      return _wasmInstance;
-    } catch (err) {
-      _wasmInstance = null;
-      throw new Error(
-        `Could not load laszip WASM from CDN.\n` +
-        `Install it via: npm install laszip-wasm\n` +
-        `Or decompress manually using: laszip -i file.laz -o file.las\n` +
-        `Or use the online converter at: https://laszip.org/\n` +
-        `Falling back to error.`
-      );
     }
+
+    if (typeof globalThis.createLazPerf === 'undefined') {
+      throw new Error('laz-perf.js loaded but createLazPerf not found globally');
+    }
+
+    const module = await globalThis.createLazPerf({
+      locateFile: (path) => LAZ_PERF_WASM_DIR + path
+    });
+
+    if (!module.LASZip) {
+      throw new Error('laz-perf module loaded but LASZip class not found');
+    }
+
+    _lazPerfModule = module;
+    return module;
   })();
 
-  return _wasmLoading;
+  return _loading;
 }
 
 /**
- * Decompress a LAZ ArrayBuffer to LAS ArrayBuffer.
- * Returns the raw LAS data ready for parsing.
- *
- * @param {ArrayBuffer} lazBuffer
- * @returns {Promise<ArrayBuffer>}
+ * Decomprime un buffer LAZ in un buffer LAS.
+ * 
+ * @param {ArrayBuffer} lazBuffer - Buffer LAZ compresso
+ * @returns {Promise<ArrayBuffer>} Buffer LAS decompresso
  */
 export async function decompressLAZ(lazBuffer) {
-  const wasm = await _loadWasm();
-  const decoder = wasm.exports.laszip_decoder_create
-    ? wasm
-    : _throwNoDecoder();
+  const module = await _loadLazPerf();
 
   const size = lazBuffer.byteLength;
-  // La memoria WASM ha un limite di 64MB. Con ratio compressione ~3-5x,
-  // file LAZ > ~12MB potrebbero superare il limite di decompressione.
-  if (size > 12 * 1024 * 1024) {
-    throw new Error(
-      `File LAZ troppo grande per decompressione in-browser (${(size / 1024 / 1024).toFixed(1)}MB). ` +
-      `Limite: ~12MB compressi. Usare laszip offline: laszip -i file.laz -o file.las`
-    );
+  const srcView = new Uint8Array(lazBuffer);
+
+  console.log('[LAZ] Decompressing buffer, size:', size, 'bytes');
+
+  // Verifica firma LAS/LAZ
+  if (size < 4 || srcView[0] !== 0x4C || srcView[1] !== 0x41 || 
+      srcView[2] !== 0x53 || srcView[3] !== 0x46) {
+    console.error('[LAZ] Invalid signature. First 4 bytes:', 
+      Array.from(srcView.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+    throw new Error('Not a valid LAZ file (signature mismatch)');
   }
 
-  const inputPtr = wasm.exports.malloc(size);
-  if (!inputPtr) throw new Error('WASM memory allocation failed for input buffer');
-  const inputBuf = new Uint8Array(wasm.exports.memory.buffer, inputPtr, size);
-  inputBuf.set(new Uint8Array(lazBuffer));
+  // Leggi header LAS per estrarre info necessarie
+  const dv = new DataView(lazBuffer);
+  const headerSize = dv.getUint16(94, true);
+  const pointDataOffset = dv.getUint32(96, true);
+  const pointFormat = dv.getUint8(104, true);
+  const pointRecordLength = dv.getUint16(105, true);
+  let pointCount = dv.getUint32(107, true);
 
-  const outputSizePtr = wasm.exports.malloc(4);
-  if (!outputSizePtr) {
-    wasm.exports.free(inputPtr);
-    throw new Error('WASM memory allocation failed for output size pointer');
+  // LAS 1.4 64-bit point count
+  const majorVersion = dv.getUint8(24);
+  const minorVersion = dv.getUint8(25);
+  if (majorVersion === 1 && minorVersion >= 4 && headerSize >= 375) {
+    const countLow = dv.getUint32(247, true);
+    const countHigh = dv.getUint32(251, true);
+    const count64 = countLow + (countHigh * 0x100000000);
+    if (count64 > 0) pointCount = Number(count64);
   }
-  const outputPtr = wasm.exports.laszip_decode(inputPtr, size, outputSizePtr);
 
-  if (!outputPtr) {
-    wasm.exports.free(inputPtr);
-    wasm.exports.free(outputSizePtr);
-    throw new Error('WASM laszip decompression failed');
+  console.log('[LAZ] Point count:', pointCount, 'Point format:', pointFormat, 
+              'Record length:', pointRecordLength);
+
+  // Alloca memoria WASM per il buffer LAZ
+  const inputPtr = module._malloc(size);
+  if (!inputPtr) throw new Error('WASM memory allocation failed for LAZ buffer');
+
+  try {
+    module.HEAPU8.set(srcView, inputPtr);
+
+    // Crea decoder LASZip
+    const laszip = new module.LASZip();
+    
+    try {
+      laszip.open(inputPtr, size);
+
+      const actualCount = laszip.getCount();
+      const actualPointLength = laszip.getPointLength();
+
+      console.log('[LAZ] Decompressor reports:', actualCount, 'points,', 
+                  actualPointLength, 'bytes per point');
+
+      if (actualCount !== pointCount) {
+        console.warn('[LAZ] Point count mismatch: header says', pointCount, 
+                     'but decompressor says', actualCount);
+        pointCount = actualCount;
+      }
+
+      // Alloca buffer per i punti decompressi
+      const totalPointSize = pointCount * actualPointLength;
+      console.log('[LAZ] Total decompressed size:', totalPointSize, 'bytes');
+      
+      const outputBuffer = new Uint8Array(totalPointSize);
+      const pointPtr = module._malloc(actualPointLength);
+      
+      if (!pointPtr) {
+        throw new Error('WASM memory allocation failed for point buffer');
+      }
+
+      try {
+        // Decomprimi punto per punto
+        for (let i = 0; i < pointCount; i++) {
+          laszip.getPoint(pointPtr);
+          outputBuffer.set(
+            module.HEAPU8.subarray(pointPtr, pointPtr + actualPointLength),
+            i * actualPointLength
+          );
+          
+          // Progress reporting ogni 100k punti
+          if (i % 100000 === 0) {
+            console.log('[LAZ] Decompressed', i, '/', pointCount, 'points');
+          }
+        }
+      } finally {
+        module._free(pointPtr);
+      }
+
+      // Costruisci buffer LAS finale
+      // Mantieni header + VLR originali, sostituisci solo i dati dei punti
+      const result = new Uint8Array(pointDataOffset + totalPointSize);
+      result.set(srcView.subarray(0, pointDataOffset), 0);
+      result.set(outputBuffer, pointDataOffset);
+
+      console.log('[LAZ] Decompression complete. Final buffer size:', result.buffer.byteLength);
+      return result.buffer;
+
+    } finally {
+      laszip.delete();
+    }
+  } finally {
+    module._free(inputPtr);
   }
-
-  const outSize = new Uint32Array(wasm.exports.memory.buffer, outputSizePtr, 1)[0];
-  const output = new Uint8Array(wasm.exports.memory.buffer, outputPtr, outSize);
-  const result = output.slice().buffer;
-
-  wasm.exports.free(inputPtr);
-  wasm.exports.free(outputPtr);
-  wasm.exports.free(outputSizePtr);
-
-  return result;
-}
-
-function _throwNoDecoder() {
-  throw new Error(
-    'LAZ decompression requires the laszip-wasm package.\n\n' +
-    'Install: npm install laszip-wasm\n' +
-    'Or decompress your file manually:\n' +
-    '  laszip -i file.laz -o file.las\n' +
-    'Or use the online converter at https://laszip.org/'
-  );
 }

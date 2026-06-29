@@ -60,10 +60,18 @@ export function bindInput(app) {
     const dy = (e.clientY - app._lastMouse[1]) * dpr;
     app._lastMouse = [e.clientX, e.clientY];
     if (app._dragButton === 2) {
-      app.camera.panX += dx;
-      app.camera.panY += dy;
+      // Pan relativo all'orientamento dell'oggetto
+      const rotAngle = app.camera.rotAngle;
+      const cosA = Math.cos(rotAngle);
+      const sinA = Math.sin(rotAngle);
+      // Trasforma il movimento del mouse nel sistema di riferimento dell'oggetto
+      const panX = dx * cosA + dy * sinA;
+      const panY = -dx * sinA + dy * cosA;
+      app.camera.panX += panX;
+      app.camera.panY += panY;
       app.camera.markDirty();
     } else {
+      // Rotazione relativa all'orientamento dell'oggetto
       app.camera.rotateHorizontal(-dx * ROTATION_SENSITIVITY);
       app.camera.rotateVertical(-dy * VERTICAL_ROTATION_SENSITIVITY);
     }

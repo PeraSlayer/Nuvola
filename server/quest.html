@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Nuvola VR - Meta Quest</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      background: #000;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      touch-action: none;
+    }
+    
+    #canvas {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+    
+    #overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.9);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: #fff;
+      z-index: 1000;
+    }
+    
+    #overlay.hidden {
+      display: none;
+    }
+    
+    .status {
+      font-size: 24px;
+      margin: 20px;
+      text-align: center;
+    }
+    
+    .info {
+      font-size: 16px;
+      color: #888;
+      margin: 10px;
+      text-align: center;
+      max-width: 80%;
+    }
+    
+    button {
+      background: #00d4ff;
+      color: #000;
+      border: none;
+      padding: 15px 40px;
+      font-size: 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin: 10px;
+      font-weight: bold;
+    }
+    
+    button:active {
+      background: #0099cc;
+    }
+    
+    #fps {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: #0f0;
+      padding: 10px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 14px;
+      z-index: 999;
+    }
+    
+    #controls {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px;
+      border-radius: 8px;
+      z-index: 999;
+    }
+    
+    .control-btn {
+      background: rgba(255, 255, 255, 0.2);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      padding: 10px 20px;
+      margin: 5px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    
+    .control-btn:active {
+      background: rgba(255, 255, 255, 0.4);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  
+  <div id="fps">FPS: --</div>
+  
+  <div id="controls">
+    <button class="control-btn" onclick="moveForward()">↑ Avanti</button>
+    <button class="control-btn" onclick="moveBackward()">↓ Indietro</button>
+    <button class="control-btn" onclick="resetCamera()">⟲ Reset</button>
+  </div>
+  
+  <div id="overlay">
+    <div class="status">🌩️ Nuvola VR</div>
+    <div class="info">Connessione al server...</div>
+    <button onclick="startVR()">Avvia VR</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const overlay = document.getElementById('overlay');
+    const fpsDisplay = document.getElementById('fps');
+    
+    let ws = null;
+    let isConnected = false;
+    let frameCount = 0;
+    let lastFpsTime = Date.now();
+    
+    // Camera state
+    let camera = {
+      position: { x: 0, y: 0, z: 5 },
+      rotation: { x: 0, y: 0, z: 0 }
+    };
+    
+    // Device orientation
+    let deviceOrientation = { alpha: 0, beta: 0, gamma: 0 };
+    let useDeviceOrientation = false;
+    
+    // Resize canvas
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    
+    // Connessione WebSocket
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}`;
+      
+      console.log('Connessione a:', wsUrl);
+      overlay.querySelector('.info').textContent = 'Connessione al server...';
+      
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+      
+      ws.onopen = () => {
+        console.log('✓ Connesso al server');
+        isConnected = true;
+        overlay.classList.add('hidden');
+        startOrientationTracking();
+      };
+      
+      ws.onmessage = (event) => {
+        // Ricevi frame JPEG
+        const blob = new Blob([event.data], { type: 'image/jpeg' });
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url);
+          
+          // Aggiorna FPS
+          frameCount++;
+          const now = Date.now();
+          if (now - lastFpsTime >= 1000) {
+            fpsDisplay.textContent = `FPS: ${frameCount}`;
+            frameCount = 0;
+            lastFpsTime = now;
+          }
+        };
+        
+        img.src = url;
+      };
+      
+      ws.onclose = () => {
+        console.log('Connessione chiusa');
+        isConnected = false;
+        overlay.classList.remove('hidden');
+        overlay.querySelector('.info').textContent = 'Connessione persa. Ricarica la pagina.';
+      };
+      
+      ws.onerror = (error) => {
+        console.error('Errore WebSocket:', error);
+        overlay.querySelector('.info').textContent = 'Errore di connessione. Controlla il server.';
+      };
+    }
+    
+    // Tracking orientamento dispositivo
+    function startOrientationTracking() {
+      if (window.DeviceOrientationEvent) {
+        // Richiedi permessi per iOS 13+
+        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+          DeviceOrientationEvent.requestPermission()
+            .then(permission => {
+              if (permission === 'granted') {
+                enableOrientationTracking();
+              }
+            })
+            .catch(console.error);
+        } else {
+          enableOrientationTracking();
+        }
+      }
+    }
+    
+    function enableOrientationTracking() {
+      useDeviceOrientation = true;
+      
+      window.addEventListener('deviceorientation', (event) => {
+        deviceOrientation.alpha = event.alpha || 0; // Z (yaw)
+        deviceOrientation.beta = event.beta || 0;   // X (pitch)
+        deviceOrientation.gamma = event.gamma || 0; // Y (roll)
+        
+        // Converti in radianti e aggiorna camera
+        camera.rotation.x = (deviceOrientation.beta - 90) * Math.PI / 180;
+        camera.rotation.y = deviceOrientation.gamma * Math.PI / 180;
+        camera.rotation.z = -deviceOrientation.alpha * Math.PI / 180;
+        
+        sendTrackingData();
+      });
+    }
+    
+    // Controlli touch per movimento
+    let touchStart = null;
+    
+    canvas.addEventListener('touchstart', (e) => {
+      touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    });
+    
+    canvas.addEventListener('touchmove', (e) => {
+      if (!touchStart) return;
+      
+      const touch = e.touches[0];
+      const deltaX = touch.clientX - touchStart.x;
+      const deltaY = touch.clientY - touchStart.y;
+      
+      // Rotazione con drag
+      camera.rotation.y += deltaX * 0.005;
+      camera.rotation.x += deltaY * 0.005;
+      
+      // Limita pitch
+      camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+      
+      touchStart = { x: touch.clientX, y: touch.clientY };
+      sendTrackingData();
+    });
+    
+    canvas.addEventListener('touchend', () => {
+      touchStart = null;
+    });
+    
+    // Controlli movimento
+    function moveForward() {
+      const speed = 0.5;
+      camera.position.z -= speed * Math.cos(camera.rotation.y);
+      camera.position.x -= speed * Math.sin(camera.rotation.y);
+      sendTrackingData();
+    }
+    
+    function moveBackward() {
+      const speed = 0.5;
+      camera.position.z += speed * Math.cos(camera.rotation.y);
+      camera.position.x += speed * Math.sin(camera.rotation.y);
+      sendTrackingData();
+    }
+    
+    function resetCamera() {
+      camera.position = { x: 0, y: 0, z: 5 };
+      camera.rotation = { x: 0, y: 0, z: 0 };
+      sendTrackingData();
+    }
+    
+    // Invia dati tracking al server
+    function sendTrackingData() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      
+      ws.send(JSON.stringify({
+        type: 'tracking',
+        position: camera.position,
+        rotation: camera.rotation
+      }));
+    }
+    
+    // Avvia VR
+    function startVR() {
+      if (!isConnected) {
+        connect();
+      }
+    }
+    
+    // Avvia connessione automatica
+    connect();
+    
+    // Invia tracking periodicamente
+    setInterval(() => {
+      if (isConnected) {
+        sendTrackingData();
+      }
+    }, 50); // 20 Hz
+  </script>
+</body>
+</html>

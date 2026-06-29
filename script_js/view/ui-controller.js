@@ -146,6 +146,20 @@ export class UIController {
     };
     $('btn-clear-measure').onclick = () => a.clearMeasurement();
 
+    // --- VR Mode -----------------------------------------------------------
+    $('btn-vr').onclick = async () => {
+      // Verifica supporto VR
+      const supported = await a.vrMode.isSupported();
+      if (!supported) {
+        $('vr-info').textContent = 'WebXR not supported on this device/browser';
+        $('vr-info').style.color = '#ff3b30';
+        return;
+      }
+      $('vr-info').textContent = 'VR supported ✓';
+      $('vr-info').style.color = '#34c759';
+      await a.toggleVR();
+    };
+
     // --- Mobile sidebar toggle --------------------------------------------
     $('toggle-sidebar').onclick = () => $('sidebar').classList.toggle('open');
 
