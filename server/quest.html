@@ -131,7 +131,7 @@
 
   <script>
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const overlay = document.getElementById('overlay');
     const fpsDisplay = document.getElementById('fps');
     
@@ -150,16 +150,28 @@
     let deviceOrientation = { alpha: 0, beta: 0, gamma: 0 };
     let useDeviceOrientation = false;
     
-    // Resize canvas con risoluzione ridotta per performance
+    // Canvas offscreen per decoding
+    const offscreenCanvas = document.createElement('canvas');
+    const offscreenCtx = offscreenCanvas.getContext('2d', { alpha: false });
+    
+    // Resize canvas con risoluzione molto ridotta per performance
     function resizeCanvas() {
-      // Usa risoluzione ridotta (75%) per migliorare performance
-      const scale = 0.75;
+      // Usa risoluzione molto ridotta (50%) per massimizzare performance
+      const scale = 0.5;
       canvas.width = window.innerWidth * scale;
       canvas.height = window.innerHeight * scale;
+      
+      // Canvas offscreen stessa dimensione
+      offscreenCanvas.width = canvas.width;
+      offscreenCanvas.height = canvas.height;
       
       // Mantieni dimensione visuale con CSS
       canvas.style.width = window.innerWidth + 'px';
       canvas.style.height = window.innerHeight + 'px';
+      
+      // Disabilita antialiasing per performance
+      ctx.imageSmoothingEnabled = false;
+      offscreenCtx.imageSmoothingEnabled = false;
     }
     
     window.addEventListener('resize', resizeCanvas);
@@ -190,10 +202,13 @@
         const img = new Image();
         
         img.onload = () => {
-          // Usa requestAnimationFrame per rendering smooth
+          // Decodifica su canvas offscreen
+          offscreenCtx.drawImage(img, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+          URL.revokeObjectURL(url);
+          
+          // Copia sul canvas principale (operazione veloce)
           requestAnimationFrame(() => {
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            URL.revokeObjectURL(url);
+            ctx.drawImage(offscreenCanvas, 0, 0);
           });
           
           // Aggiorna FPS

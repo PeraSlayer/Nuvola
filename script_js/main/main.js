@@ -222,10 +222,13 @@ class App {
     this._streaming = false;
     this._streamInterval = null;
     this._frameCount = 0;
-    this._streamQuality = 0.4; // Qualità JPEG iniziale (40%)
-    this._streamFPS = 15; // FPS iniziale
+    this._streamQuality = 0.25; // Qualità JPEG iniziale (25%)
+    this._streamFPS = 10; // FPS iniziale
     this._lastFrameTime = 0;
     this._frameTimes = []; // Per calcolare media
+    this._streamStartTime = 0;
+    this._originalCanvasWidth = 0;
+    this._originalCanvasHeight = 0;
     this._lastMouse = [0, 0];
     this._minimapFrame = 0;
     this._hudEl = document.getElementById('hud');
@@ -1011,19 +1014,20 @@ class App {
     this._originalCanvasWidth = this.canvas.width;
     this._originalCanvasHeight = this.canvas.height;
     
-    // Riduci risoluzione canvas durante streaming (50%)
-    const streamScale = 0.5;
+    // Riduci risoluzione canvas durante streaming (30%)
+    const streamScale = 0.3;
     this.canvas.width = this._originalCanvasWidth * streamScale;
     this.canvas.height = this._originalCanvasHeight * streamScale;
     
     this._streamWs.onopen = () => {
       console.log('[Stream] ✓ Connesso al server');
       this._streaming = true;
+      this._streamStartTime = performance.now();
       
-      // Invia frame a 15 FPS (ridotto per performance)
+      // Invia frame a 10 FPS (ridotto per performance)
       this._streamInterval = setInterval(() => {
         this._sendFrame();
-      }, 66); // ~15 FPS
+      }, 100); // ~10 FPS
       
       const btn = document.getElementById('btn-stream');
       if (btn) {
@@ -1033,7 +1037,7 @@ class App {
       
       const info = document.getElementById('stream-info');
       if (info) {
-        info.textContent = 'Streaming attivo ✓ (15 FPS, qualità adattiva)';
+        info.textContent = 'Streaming attivo ✓ (10 FPS, qualità adattiva)';
         info.style.color = '#34c759';
       }
     };
@@ -1167,27 +1171,24 @@ class App {
       // Cattura il frame dal canvas WebGL con qualità adattiva
       const dataUrl = this.canvas.toDataURL('image/jpeg', this._streamQuality);
       
+      const captureTime = performance.now() - startTime;
+      
       // Converti data URL in blob
       const byteString = atob(dataUrl.split(',')[1]);
-      const mimeString = dataUrl.split(',')[0].split(':')[1].split(';')[0];
-      const ab = new ArrayBuffer(byteString.length);
-      const ia = new Uint8Array(ab);
+      const ab = new Uint8Array(byteString.length);
       
       for (let i = 0; i < byteString.length; i++) {
-        ia[i] = byteString.charCodeAt(i);
+        ab[i] = byteString.charCodeAt(i);
       }
       
-      const blob = new Blob([ab], { type: mimeString });
-      const sizeKB = (blob.size / 1024).toFixed(1);
-      
       // Invia come binary
-      this._streamWs.send(blob);
+      this._streamWs.send(ab.buffer);
       
-      const endTime = performance.now();
-      const captureTime = endTime - startTime;
+      const totalTime = performance.now() - startTime;
+      const sizeKB = (ab.length / 1024).toFixed(1);
       
       // Salva tempo di cattura
-      this._frameTimes.push(captureTime);
+      this._frameTimes.push(totalTime);
       if (this._frameTimes.length > 10) {
         this._frameTimes.shift();
       }
@@ -1196,18 +1197,19 @@ class App {
       const avgTime = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
       
       // Adaptive quality: riduci se troppo lento
-      if (avgTime > 50 && this._streamQuality > 0.2) {
-        this._streamQuality = Math.max(0.2, this._streamQuality - 0.05);
+      if (avgTime > 100 && this._streamQuality > 0.15) {
+        this._streamQuality = Math.max(0.15, this._streamQuality - 0.05);
         console.log(`[Stream] Qualità ridotta a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
-      } else if (avgTime < 20 && this._streamQuality < 0.6) {
-        this._streamQuality = Math.min(0.6, this._streamQuality + 0.05);
+      } else if (avgTime < 50 && this._streamQuality < 0.4) {
+        this._streamQuality = Math.min(0.4, this._streamQuality + 0.05);
         console.log(`[Stream] Qualità aumentata a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
       }
       
       // Log performance ogni 10 frame
       this._frameCount++;
       if (this._frameCount % 10 === 0) {
-        console.log(`[Stream] Frame: ${sizeKB}KB, quality: ${(this._streamQuality * 100).toFixed(0)}%, avg: ${avgTime.toFixed(1)}ms`);
+        const elapsed = ((performance.now() - this._streamStartTime) / 1000).toFixed(1);
+        console.log(`[Stream] Frame: ${sizeKB}KB, quality: ${(this._streamQuality * 100).toFixed(0)}%, capture: ${captureTime.toFixed(1)}ms, total: ${avgTime.toFixed(1)}ms, elapsed: ${elapsed}s`);
       }
     } catch (error) {
       console.error('[Stream] Errore invio frame:', error);
