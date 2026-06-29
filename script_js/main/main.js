@@ -1000,7 +1000,7 @@ class App {
     }
   }
 
-  startStreaming() {
+  async startStreaming() {
     if (this._streaming) return;
     
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1018,6 +1018,9 @@ class App {
     const streamScale = 0.3;
     this.canvas.width = this._originalCanvasWidth * streamScale;
     this.canvas.height = this._originalCanvasHeight * streamScale;
+    
+    // Inizializza encoder video
+    await this._initVideoEncoder();
     
     this._streamWs.onopen = () => {
       console.log('[Stream] ✓ Connesso al server');
@@ -1037,7 +1040,8 @@ class App {
       
       const info = document.getElementById('stream-info');
       if (info) {
-        info.textContent = 'Streaming attivo ✓ (10 FPS, qualità adattiva)';
+        const codec = this._videoEncoder ? 'AV1' : 'JPEG';
+        info.textContent = `Streaming attivo ✓ (10 FPS, ${codec})`;
         info.style.color = '#34c759';
       }
     };
@@ -1045,9 +1049,18 @@ class App {
     this._streamWs.onmessage = (event) => {
       // Ricevi tracking dal Quest
       try {
+        // Controlla se è un messaggio binario (frame) o JSON (input)
+        if (event.data instanceof Blob) {
+          // Messaggio binario - ignoriamo, è un frame
+          return;
+        }
+        
         const data = JSON.parse(event.data);
+        console.log('[Stream] Input ricevuto:', data.type);
         
         if (data.type === 'tracking') {
+          console.log('[Stream] Tracking:', data);
+          
           // Applica tracking alla camera
           if (this.camera && data.rotation) {
             // Mappa rotazione Quest a camera isometrica
@@ -1090,6 +1103,7 @@ class App {
             this.camera.markDirty();
           }
         } else if (data.type === 'click') {
+          console.log('[Stream] Click:', data);
           // Gestisci click dal Quest
           if (this.cloud && this.measurement) {
             const rect = this.canvas.getBoundingClientRect();
@@ -1125,6 +1139,53 @@ class App {
     };
   }
 
+  async _initVideoEncoder() {
+    // Prova a usare WebCodecs per AV1 encoding
+    if ('VideoEncoder' in window) {
+      try {
+        const config = {
+          codec: 'av01.0.01M.08', // AV1 Main Profile, Level 2.0, 8-bit
+          width: this.canvas.width,
+          height: this.canvas.height,
+          bitrate: 500000, // 500 kbps
+          framerate: 10,
+          hardwareAcceleration: 'prefer-hardware'
+        };
+        
+        this._videoEncoder = new VideoEncoder({
+          output: (chunk, meta) => {
+            this._handleEncodedChunk(chunk, meta);
+          },
+          error: (e) => {
+            console.error('[Stream] VideoEncoder error:', e);
+            this._videoEncoder = null;
+          }
+        });
+        
+        this._videoEncoder.configure(config);
+        console.log('[Stream] AV1 encoder inizializzato');
+      } catch (e) {
+        console.warn('[Stream] AV1 non supportato, uso JPEG:', e);
+        this._videoEncoder = null;
+      }
+    } else {
+      console.warn('[Stream] WebCodecs non supportato, uso JPEG');
+      this._videoEncoder = null;
+    }
+  }
+
+  _handleEncodedChunk(chunk, meta) {
+    if (!this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) return;
+    
+    const buffer = new ArrayBuffer(chunk.byteLength);
+    chunk.copyTo(buffer);
+    
+    // Invia chunk codificato
+    this._streamWs.send(buffer);
+    
+    chunk.close();
+  }
+
   stopStreaming() {
     if (!this._streaming) return;
     
@@ -1133,6 +1194,12 @@ class App {
     if (this._streamInterval) {
       clearInterval(this._streamInterval);
       this._streamInterval = null;
+    }
+    
+    // Chiudi encoder video
+    if (this._videoEncoder) {
+      this._videoEncoder.close();
+      this._videoEncoder = null;
     }
     
     if (this._streamWs) {
@@ -1168,48 +1235,67 @@ class App {
     try {
       const startTime = performance.now();
       
-      // Cattura il frame dal canvas WebGL con qualità adattiva
-      const dataUrl = this.canvas.toDataURL('image/jpeg', this._streamQuality);
-      
-      const captureTime = performance.now() - startTime;
-      
-      // Converti data URL in blob
-      const byteString = atob(dataUrl.split(',')[1]);
-      const ab = new Uint8Array(byteString.length);
-      
-      for (let i = 0; i < byteString.length; i++) {
-        ab[i] = byteString.charCodeAt(i);
-      }
-      
-      // Invia come binary
-      this._streamWs.send(ab.buffer);
-      
-      const totalTime = performance.now() - startTime;
-      const sizeKB = (ab.length / 1024).toFixed(1);
-      
-      // Salva tempo di cattura
-      this._frameTimes.push(totalTime);
-      if (this._frameTimes.length > 10) {
-        this._frameTimes.shift();
-      }
-      
-      // Calcola media tempi
-      const avgTime = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
-      
-      // Adaptive quality: riduci se troppo lento
-      if (avgTime > 100 && this._streamQuality > 0.15) {
-        this._streamQuality = Math.max(0.15, this._streamQuality - 0.05);
-        console.log(`[Stream] Qualità ridotta a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
-      } else if (avgTime < 50 && this._streamQuality < 0.4) {
-        this._streamQuality = Math.min(0.4, this._streamQuality + 0.05);
-        console.log(`[Stream] Qualità aumentata a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
-      }
-      
-      // Log performance ogni 10 frame
-      this._frameCount++;
-      if (this._frameCount % 10 === 0) {
-        const elapsed = ((performance.now() - this._streamStartTime) / 1000).toFixed(1);
-        console.log(`[Stream] Frame: ${sizeKB}KB, quality: ${(this._streamQuality * 100).toFixed(0)}%, capture: ${captureTime.toFixed(1)}ms, total: ${avgTime.toFixed(1)}ms, elapsed: ${elapsed}s`);
+      if (this._videoEncoder) {
+        // Usa encoder AV1
+        const frame = new VideoFrame(this.canvas, {
+          timestamp: performance.now() * 1000 // microseconds
+        });
+        
+        this._videoEncoder.encode(frame, { keyFrame: false });
+        frame.close();
+        
+        const totalTime = performance.now() - startTime;
+        
+        // Log performance ogni 10 frame
+        this._frameCount++;
+        if (this._frameCount % 10 === 0) {
+          const elapsed = ((performance.now() - this._streamStartTime) / 1000).toFixed(1);
+          console.log(`[Stream] AV1 encode time: ${totalTime.toFixed(1)}ms, elapsed: ${elapsed}s`);
+        }
+      } else {
+        // Fallback a JPEG
+        const dataUrl = this.canvas.toDataURL('image/jpeg', this._streamQuality);
+        
+        const captureTime = performance.now() - startTime;
+        
+        // Converti data URL in blob
+        const byteString = atob(dataUrl.split(',')[1]);
+        const ab = new Uint8Array(byteString.length);
+        
+        for (let i = 0; i < byteString.length; i++) {
+          ab[i] = byteString.charCodeAt(i);
+        }
+        
+        // Invia come binary
+        this._streamWs.send(ab.buffer);
+        
+        const totalTime = performance.now() - startTime;
+        const sizeKB = (ab.length / 1024).toFixed(1);
+        
+        // Salva tempo di cattura
+        this._frameTimes.push(totalTime);
+        if (this._frameTimes.length > 10) {
+          this._frameTimes.shift();
+        }
+        
+        // Calcola media tempi
+        const avgTime = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
+        
+        // Adaptive quality: riduci se troppo lento
+        if (avgTime > 100 && this._streamQuality > 0.15) {
+          this._streamQuality = Math.max(0.15, this._streamQuality - 0.05);
+          console.log(`[Stream] Qualità ridotta a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
+        } else if (avgTime < 50 && this._streamQuality < 0.4) {
+          this._streamQuality = Math.min(0.4, this._streamQuality + 0.05);
+          console.log(`[Stream] Qualità aumentata a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
+        }
+        
+        // Log performance ogni 10 frame
+        this._frameCount++;
+        if (this._frameCount % 10 === 0) {
+          const elapsed = ((performance.now() - this._streamStartTime) / 1000).toFixed(1);
+          console.log(`[Stream] JPEG: ${sizeKB}KB, quality: ${(this._streamQuality * 100).toFixed(0)}%, capture: ${captureTime.toFixed(1)}ms, total: ${avgTime.toFixed(1)}ms, elapsed: ${elapsed}s`);
+        }
       }
     } catch (error) {
       console.error('[Stream] Errore invio frame:', error);

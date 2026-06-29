@@ -78,6 +78,16 @@ wss.on('connection', (ws) => {
   
   // Inoltra messaggi a tutti i client connessi
   ws.on('message', (message) => {
+    // Log messaggi di input per debug
+    try {
+      const data = JSON.parse(message);
+      if (data.type === 'tracking' || data.type === 'click') {
+        console.log('📥 Input ricevuto:', data.type);
+      }
+    } catch (e) {
+      // Messaggio binario (frame video)
+    }
+    
     connectedClients.forEach(client => {
       if (client !== ws && client.readyState === 1) {
         client.send(message);
