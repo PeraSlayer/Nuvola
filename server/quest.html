@@ -370,14 +370,11 @@
     function sendTrackingData() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       
-      const message = {
+      ws.send(JSON.stringify({
         type: 'tracking',
         position: camera.position,
         rotation: camera.rotation
-      };
-      
-      console.log('Sending tracking:', message);
-      ws.send(JSON.stringify(message));
+      }));
     }
     
     // Avvia VR

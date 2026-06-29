@@ -1014,6 +1014,15 @@ class App {
     this._originalCanvasWidth = this.canvas.width;
     this._originalCanvasHeight = this.canvas.height;
     
+    // Salva stato iniziale della camera per applicare offset
+    this._initialCameraState = {
+      rotAngle: this.camera._rotAngle,
+      rotationXDeg: this.camera.rotationXDeg,
+      zoom: this.camera.zoom,
+      panX: this.camera.panX,
+      panY: this.camera.panY
+    };
+    
     // Riduci risoluzione canvas durante streaming (30%)
     const streamScale = 0.3;
     this.canvas.width = this._originalCanvasWidth * streamScale;
@@ -1056,54 +1065,47 @@ class App {
         }
         
         const data = JSON.parse(event.data);
-        console.log('[Stream] Input ricevuto:', data.type);
         
         if (data.type === 'tracking') {
-          console.log('[Stream] Tracking:', data);
-          
-          // Applica tracking alla camera
-          if (this.camera && data.rotation) {
-            // Mappa rotazione Quest a camera isometrica
-            // rotation.y = yaw (rotazione orizzontale)
-            // rotation.x = pitch (rotazione verticale)
-            
-            // Applica rotazione orizzontale (yaw)
-            if (data.rotation.y !== undefined) {
-              this.camera._rotAngle = data.rotation.y;
+          // Applica tracking alla camera come offset rispetto alla posizione iniziale
+          if (this.camera && this._initialCameraState) {
+            // Rotazione orizzontale (yaw) - applica come offset
+            if (data.rotation && data.rotation.y !== undefined) {
+              this.camera._rotAngle = this._initialCameraState.rotAngle + data.rotation.y;
             }
             
-            // Applica rotazione verticale (pitch)
-            if (data.rotation.x !== undefined) {
-              this.camera.rotationXDeg = data.rotation.x * 180 / Math.PI;
+            // Rotazione verticale (pitch) - applica come offset
+            if (data.rotation && data.rotation.x !== undefined) {
+              const pitchOffset = data.rotation.x * 180 / Math.PI;
+              this.camera.rotationXDeg = this._initialCameraState.rotationXDeg + pitchOffset;
+              // Limita pitch a +/- 89 gradi
+              this.camera.rotationXDeg = Math.max(-89, Math.min(89, this.camera.rotationXDeg));
             }
             
-            this.camera.markDirty();
-          }
-          
-          // Applica movimento (position)
-          if (this.camera && data.position) {
-            // position.z = avanti/indietro (zoom)
-            // position.x = sinistra/destra (panX)
-            // position.y = su/giù (panY)
-            
-            if (data.position.z !== undefined) {
-              // Mappa position.z a zoom (più lontano = zoom out)
+            // Zoom - applica come fattore
+            if (data.position && data.position.z !== undefined) {
               const zoomFactor = 1 / (1 + data.position.z * 0.1);
-              this.camera.zoom = Math.max(0.1, Math.min(10, this.camera._defaultZoom * zoomFactor));
+              this.camera.zoom = this._initialCameraState.zoom * zoomFactor;
+              this.camera.zoom = Math.max(0.1, Math.min(10, this.camera.zoom));
             }
             
-            if (data.position.x !== undefined) {
-              this.camera.panX = data.position.x * 50;
-            }
-            
-            if (data.position.y !== undefined) {
-              this.camera.panY = data.position.y * 50;
+            // Pan - applica come offset (normalizzato rispetto alla risoluzione del canvas)
+            if (data.position) {
+              const scaleX = this.canvas.width / 1000; // Normalizza rispetto a 1000px
+              const scaleY = this.canvas.height / 1000;
+              
+              if (data.position.x !== undefined) {
+                this.camera.panX = this._initialCameraState.panX + (data.position.x * scaleX);
+              }
+              
+              if (data.position.y !== undefined) {
+                this.camera.panY = this._initialCameraState.panY + (data.position.y * scaleY);
+              }
             }
             
             this.camera.markDirty();
           }
         } else if (data.type === 'click') {
-          console.log('[Stream] Click:', data);
           // Gestisci click dal Quest
           if (this.cloud && this.measurement) {
             const rect = this.canvas.getBoundingClientRect();
