@@ -220,15 +220,8 @@ class App {
     // Streaming
     this._streamWs = null;
     this._streaming = false;
-    this._streamInterval = null;
-    this._frameCount = 0;
-    this._streamQuality = 0.25; // Qualità JPEG iniziale (25%)
-    this._streamFPS = 10; // FPS iniziale
-    this._lastFrameTime = 0;
-    this._frameTimes = []; // Per calcolare media
-    this._streamStartTime = 0;
-    this._originalCanvasWidth = 0;
-    this._originalCanvasHeight = 0;
+    this._streamQuality = 0.5;
+    this._streamLoop = null;
     this._lastMouse = [0, 0];
     this._minimapFrame = 0;
     this._hudEl = document.getElementById('hud');
@@ -869,32 +862,35 @@ class App {
           this.cloud.lru.freeMemory();
         }
 
-        if ((this._minimapFrame++ & 3) === 0) {
-          this.minimap.draw(this.cloud, this.camera, this.renderer.width, this.renderer.height);
-        }
-
-        this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
-        this._drawGizmo(this.overlayCtx);
-        if (this.gizmo.mode !== 'none' && this.cloud) {
-          this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
-        }
-        if (this.measurement.points.length) {
-          this.measurement.updateMeshes(this.cloud, this.threeOverlay);
-        }
-        if (this.gizmo.mode !== 'none') {
-            const ctx = this.overlayCtx;
-            ctx.save();
-            ctx.fillStyle = 'rgba(13,17,23,0.85)';
-            ctx.fillRect(12, 12, 120, 32);
-            ctx.fillStyle = '#e6edf3';
-            ctx.font = '13px monospace';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'middle';
-            ctx.fillText('Gizmo: ' + this.gizmo.getModeLabel(), 20, 30);
-            ctx.restore();
+        // Quando lo streaming è attivo, salta tutti i calcoli non essenziali
+        if (!this._streaming) {
+          if ((this._minimapFrame++ & 3) === 0) {
+            this.minimap.draw(this.cloud, this.camera, this.renderer.width, this.renderer.height);
           }
 
-        this.threeOverlay.render(this.camera);
+          this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+          this._drawGizmo(this.overlayCtx);
+          if (this.gizmo.mode !== 'none' && this.cloud) {
+            this.gizmo.draw(this.overlayCtx, this.camera, this.cloud);
+          }
+          if (this.measurement.points.length) {
+            this.measurement.updateMeshes(this.cloud, this.threeOverlay);
+          }
+          if (this.gizmo.mode !== 'none') {
+              const ctx = this.overlayCtx;
+              ctx.save();
+              ctx.fillStyle = 'rgba(13,17,23,0.85)';
+              ctx.fillRect(12, 12, 120, 32);
+              ctx.fillStyle = '#e6edf3';
+              ctx.font = '13px monospace';
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('Gizmo: ' + this.gizmo.getModeLabel(), 20, 30);
+              ctx.restore();
+            }
+
+          this.threeOverlay.render(this.camera);
+        }
       }
 
       this._frames++;
@@ -902,17 +898,21 @@ class App {
         this._fps = this._frames * 1000 / (now - this._lastFpsTime);
         this._frames = 0;
         this._lastFpsTime = now;
-        this.ui.updateStats(this._fps, lodCount, this.cloud ? this.cloud.count : 0);
+        
+        // Quando lo streaming è attivo, salta anche l'aggiornamento HUD
+        if (!this._streaming) {
+          this.ui.updateStats(this._fps, lodCount, this.cloud ? this.cloud.count : 0);
 
-        if (hasGeo) {
-          const views = ['N','E','S','W','NE','SE','SW','NW'];
-          const vi = this.camera.viewIndex;
-          const camLabel = this.camera.activeMode === 'fps'
-            ? `Drone`
-            : `${views[vi] || vi}`;
-          this._hudEl.innerHTML =
-            `<b>${camLabel}</b> · ${this._fps.toFixed(0)} FPS<br/>` +
-            `${this.cloud.count.toLocaleString()} points`;
+          if (hasGeo) {
+            const views = ['N','E','S','W','NE','SE','SW','NW'];
+            const vi = this.camera.viewIndex;
+            const camLabel = this.camera.activeMode === 'fps'
+              ? `Drone`
+              : `${views[vi] || vi}`;
+            this._hudEl.innerHTML =
+              `<b>${camLabel}</b> · ${this._fps.toFixed(0)} FPS<br/>` +
+              `${this.cloud.count.toLocaleString()} points`;
+          }
         }
       }
     } catch (err) {
@@ -978,9 +978,9 @@ class App {
     const slider = document.getElementById('point-budget');
     const val = document.getElementById('point-budget-val');
     const autoChk = document.getElementById('chk-auto-budget');
-    slider.value = budget;
+    if (slider) slider.value = budget;
     const label = budget >= 1e6 ? (budget / 1e6).toFixed(1) + 'M' : Math.floor(budget / 1000) + 'k';
-    val.textContent = label;
+    if (val) val.textContent = label;
     if (autoChk) autoChk.checked = this._autoScaleBudget;
   }
 
@@ -1010,29 +1010,11 @@ class App {
     this._streamWs = new WebSocket(wsUrl);
     this._streamWs.binaryType = 'arraybuffer';
     
-    // Salva dimensioni originali del canvas
-    this._originalCanvasWidth = this.canvas.width;
-    this._originalCanvasHeight = this.canvas.height;
-    
-    // Non serve salvare stato iniziale della camera - riceviamo segnali delta
-    
-    // Riduci risoluzione canvas durante streaming (30%)
-    const streamScale = 0.3;
-    this.canvas.width = this._originalCanvasWidth * streamScale;
-    this.canvas.height = this._originalCanvasHeight * streamScale;
-    
-    // Inizializza encoder video
-    await this._initVideoEncoder();
-    
     this._streamWs.onopen = () => {
       console.log('[Stream] ✓ Connesso al server');
       this._streaming = true;
-      this._streamStartTime = performance.now();
       
-      // Invia frame a 10 FPS (ridotto per performance)
-      this._streamInterval = setInterval(() => {
-        this._sendFrame();
-      }, 100); // ~10 FPS
+      this._streamWs.send(JSON.stringify({ type: 'register', role: 'host' }));
       
       const btn = document.getElementById('btn-stream');
       if (btn) {
@@ -1042,53 +1024,44 @@ class App {
       
       const info = document.getElementById('stream-info');
       if (info) {
-        const codec = this._videoEncoder ? 'AV1' : 'JPEG';
-        info.textContent = `Streaming attivo ✓ (10 FPS, ${codec})`;
+        info.textContent = 'Streaming attivo ✓ (WebSocket 60fps)';
         info.style.color = '#34c759';
       }
+      
+      this._startCaptureLoop();
     };
     
     this._streamWs.onmessage = (event) => {
-      // Ricevi segnali dal Quest (input utente)
       try {
-        if (event.data instanceof Blob) {
-          return;
-        }
+        if (event.data instanceof Blob) return;
+        if (event.data instanceof ArrayBuffer) return;
         
         const data = JSON.parse(event.data);
         
         if (data.type === 'signal') {
-          // Applica segnali delta alla camera del viewer
+          console.log('[Stream] Segnale ricevuto:', data);
           if (this.camera) {
-            // Rotazione orizzontale (yaw)
             if (data.yaw) {
               this.camera._rotAngle += data.yaw;
             }
-            
-            // Rotazione verticale (pitch)
             if (data.pitch) {
               this.camera.rotationXDeg += data.pitch * 180 / Math.PI;
               this.camera.rotationXDeg = Math.max(-89, Math.min(89, this.camera.rotationXDeg));
             }
-            
-            // Zoom
             if (data.zoom) {
               this.camera.zoom += data.zoom * 0.1;
               this.camera.zoom = Math.max(0.1, Math.min(10, this.camera.zoom));
             }
-            
-            // Pan
             if (data.panX) {
               this.camera.panX += data.panX * 50;
             }
             if (data.panY) {
               this.camera.panY += data.panY * 50;
             }
-            
             this.camera.markDirty();
           }
-        } else if (data.type === 'reset') {
-          // Reset camera alla posizione predefinita
+        }
+        else if (data.type === 'reset') {
           if (this.camera) {
             this.camera._rotAngle = 0;
             this.camera.rotationXDeg = 0;
@@ -1096,17 +1069,6 @@ class App {
             this.camera.panX = 0;
             this.camera.panY = 0;
             this.camera.markDirty();
-          }
-          if (this.cloud && this.measurement) {
-            const rect = this.canvas.getBoundingClientRect();
-            const x = data.x * rect.width;
-            const y = data.y * rect.height;
-            const clickEvent = new MouseEvent('click', {
-              clientX: x,
-              clientY: y,
-              bubbles: true
-            });
-            this.canvas.dispatchEvent(clickEvent);
           }
         }
       } catch (error) {
@@ -1129,51 +1091,53 @@ class App {
     };
   }
 
-  async _initVideoEncoder() {
-    // Prova a usare WebCodecs per AV1 encoding
-    if ('VideoEncoder' in window) {
-      try {
-        const config = {
-          codec: 'av01.0.01M.08', // AV1 Main Profile, Level 2.0, 8-bit
-          width: this.canvas.width,
-          height: this.canvas.height,
-          bitrate: 500000, // 500 kbps
-          framerate: 10,
-          hardwareAcceleration: 'prefer-hardware'
-        };
-        
-        this._videoEncoder = new VideoEncoder({
-          output: (chunk, meta) => {
-            this._handleEncodedChunk(chunk, meta);
-          },
-          error: (e) => {
-            console.error('[Stream] VideoEncoder error:', e);
-            this._videoEncoder = null;
-          }
-        });
-        
-        this._videoEncoder.configure(config);
-        console.log('[Stream] AV1 encoder inizializzato');
-      } catch (e) {
-        console.warn('[Stream] AV1 non supportato, uso JPEG:', e);
-        this._videoEncoder = null;
+  _startCaptureLoop() {
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let encodeTimes = [];
+    
+    const captureFrame = () => {
+      if (!this._streaming || !this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) {
+        return;
       }
-    } else {
-      console.warn('[Stream] WebCodecs non supportato, uso JPEG');
-      this._videoEncoder = null;
-    }
+      
+      const startTime = performance.now();
+      
+      this.canvas.toBlob((blob) => {
+        if (blob && this._streamWs && this._streamWs.readyState === WebSocket.OPEN) {
+          this._streamWs.send(blob);
+          
+          const encodeTime = performance.now() - startTime;
+          encodeTimes.push(encodeTime);
+          if (encodeTimes.length > 10) encodeTimes.shift();
+          
+          // Adatta qualità in base al tempo di encoding
+          const avgEncodeTime = encodeTimes.reduce((a, b) => a + b, 0) / encodeTimes.length;
+          if (avgEncodeTime > 20 && this._streamQuality > 0.3) {
+            this._streamQuality = Math.max(0.3, this._streamQuality - 0.05);
+          } else if (avgEncodeTime < 10 && this._streamQuality < 0.7) {
+            this._streamQuality = Math.min(0.7, this._streamQuality + 0.02);
+          }
+          
+          // Log ogni secondo
+          frameCount++;
+          const now = performance.now();
+          if (now - lastTime >= 1000) {
+            console.log(`[Stream] FPS: ${frameCount}, size: ${(blob.size / 1024).toFixed(1)}KB, encode: ${avgEncodeTime.toFixed(1)}ms, quality: ${(this._streamQuality * 100).toFixed(0)}%`);
+            frameCount = 0;
+            lastTime = now;
+          }
+        }
+      }, 'image/webp', this._streamQuality);
+      
+      this._streamLoop = requestAnimationFrame(captureFrame);
+    };
+    
+    this._streamLoop = requestAnimationFrame(captureFrame);
   }
 
-  _handleEncodedChunk(chunk, meta) {
-    if (!this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) return;
-    
-    const buffer = new ArrayBuffer(chunk.byteLength);
-    chunk.copyTo(buffer);
-    
-    // Invia chunk codificato
-    this._streamWs.send(buffer);
-    
-    chunk.close();
+  _createPeerConnection(viewerId) {
+    // Non più necessario con WebSocket
   }
 
   stopStreaming() {
@@ -1181,27 +1145,14 @@ class App {
     
     this._streaming = false;
     
-    if (this._streamInterval) {
-      clearInterval(this._streamInterval);
-      this._streamInterval = null;
-    }
-    
-    // Chiudi encoder video
-    if (this._videoEncoder) {
-      this._videoEncoder.close();
-      this._videoEncoder = null;
+    if (this._streamLoop) {
+      cancelAnimationFrame(this._streamLoop);
+      this._streamLoop = null;
     }
     
     if (this._streamWs) {
       this._streamWs.close();
       this._streamWs = null;
-    }
-    
-    // Ripristina risoluzione originale del canvas
-    if (this._originalCanvasWidth && this._originalCanvasHeight) {
-      this.canvas.width = this._originalCanvasWidth;
-      this.canvas.height = this._originalCanvasHeight;
-      this.camera.markDirty(); // Forza re-render
     }
     
     const btn = document.getElementById('btn-stream');
@@ -1216,80 +1167,7 @@ class App {
       info.style.color = '';
     }
     
-    console.log('[Stream] Streaming fermato, canvas ripristinato');
-  }
-
-  _sendFrame() {
-    if (!this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) return;
-    
-    try {
-      const startTime = performance.now();
-      
-      if (this._videoEncoder) {
-        // Usa encoder AV1
-        const frame = new VideoFrame(this.canvas, {
-          timestamp: performance.now() * 1000 // microseconds
-        });
-        
-        this._videoEncoder.encode(frame, { keyFrame: false });
-        frame.close();
-        
-        const totalTime = performance.now() - startTime;
-        
-        // Log performance ogni 10 frame
-        this._frameCount++;
-        if (this._frameCount % 10 === 0) {
-          const elapsed = ((performance.now() - this._streamStartTime) / 1000).toFixed(1);
-          console.log(`[Stream] AV1 encode time: ${totalTime.toFixed(1)}ms, elapsed: ${elapsed}s`);
-        }
-      } else {
-        // Fallback a JPEG
-        const dataUrl = this.canvas.toDataURL('image/jpeg', this._streamQuality);
-        
-        const captureTime = performance.now() - startTime;
-        
-        // Converti data URL in blob
-        const byteString = atob(dataUrl.split(',')[1]);
-        const ab = new Uint8Array(byteString.length);
-        
-        for (let i = 0; i < byteString.length; i++) {
-          ab[i] = byteString.charCodeAt(i);
-        }
-        
-        // Invia come binary
-        this._streamWs.send(ab.buffer);
-        
-        const totalTime = performance.now() - startTime;
-        const sizeKB = (ab.length / 1024).toFixed(1);
-        
-        // Salva tempo di cattura
-        this._frameTimes.push(totalTime);
-        if (this._frameTimes.length > 10) {
-          this._frameTimes.shift();
-        }
-        
-        // Calcola media tempi
-        const avgTime = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
-        
-        // Adaptive quality: riduci se troppo lento
-        if (avgTime > 100 && this._streamQuality > 0.15) {
-          this._streamQuality = Math.max(0.15, this._streamQuality - 0.05);
-          console.log(`[Stream] Qualità ridotta a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
-        } else if (avgTime < 50 && this._streamQuality < 0.4) {
-          this._streamQuality = Math.min(0.4, this._streamQuality + 0.05);
-          console.log(`[Stream] Qualità aumentata a ${(this._streamQuality * 100).toFixed(0)}% (avg: ${avgTime.toFixed(1)}ms)`);
-        }
-        
-        // Log performance ogni 10 frame
-        this._frameCount++;
-        if (this._frameCount % 10 === 0) {
-          const elapsed = ((performance.now() - this._streamStartTime) / 1000).toFixed(1);
-          console.log(`[Stream] JPEG: ${sizeKB}KB, quality: ${(this._streamQuality * 100).toFixed(0)}%, capture: ${captureTime.toFixed(1)}ms, total: ${avgTime.toFixed(1)}ms, elapsed: ${elapsed}s`);
-        }
-      }
-    } catch (error) {
-      console.error('[Stream] Errore invio frame:', error);
-    }
+    console.log('[Stream] Streaming fermato');
   }
 }
 

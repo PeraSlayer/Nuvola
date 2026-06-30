@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Nuvola Stream</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; touch-action: none; }
+    
+    #canvas {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      object-fit: contain;
+      background: #000;
+    }
+    
+    #overlay {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.95);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: #fff;
+      z-index: 1000;
+      transition: opacity 0.3s;
+    }
+    
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+    
+    .status { font-size: 28px; margin: 20px; text-align: center; font-weight: 600; }
+    .info { font-size: 16px; color: #888; margin: 10px; text-align: center; max-width: 80%; }
+    
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+      z-index: 999;
+      pointer-events: none;
+    }
+    
+    #hud > * { pointer-events: auto; }
+    
+    #fps {
+      background: rgba(0, 0, 0, 0.6);
+      color: #0f0;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-family: 'SF Mono', Monaco, monospace;
+      font-size: 13px;
+    }
+    
+    #control-status {
+      background: rgba(0, 0, 0, 0.6);
+      color: #888;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      transition: all 0.3s;
+    }
+    
+    #control-status.active {
+      background: rgba(52, 199, 89, 0.3);
+      color: #34c759;
+      border: 1px solid rgba(52, 199, 89, 0.5);
+    }
+    
+    #bottom-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 16px;
+      background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+      z-index: 999;
+      gap: 12px;
+    }
+    
+    .btn {
+      background: rgba(255, 255, 255, 0.15);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    
+    .btn:active { transform: scale(0.95); background: rgba(255, 255, 255, 0.25); }
+    
+    .btn-control {
+      background: rgba(0, 212, 255, 0.2);
+      border-color: rgba(0, 212, 255, 0.4);
+      color: #00d4ff;
+    }
+    
+    .btn-control.active {
+      background: rgba(255, 59, 48, 0.2);
+      border-color: rgba(255, 59, 48, 0.4);
+      color: #ff3b30;
+    }
+    
+    .btn-reset {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+    
+    @media (max-width: 768px) {
+      .btn { padding: 10px 18px; font-size: 14px; }
+      #fps, #control-status { font-size: 12px; padding: 5px 10px; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  
+  <div id="overlay">
+    <div class="status">Nuvola Stream</div>
+    <div class="info" id="overlay-info">Connessione al server...</div>
+  </div>
+  
+  <div id="hud">
+    <div id="fps">FPS: --</div>
+    <div id="control-status">No control</div>
+  </div>
+  
+  <div id="bottom-bar">
+    <button class="btn btn-control" id="btn-control">Take Control</button>
+    <button class="btn btn-reset" id="btn-reset">Reset View</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    const overlay = document.getElementById('overlay');
+    const overlayInfo = document.getElementById('overlay-info');
+    const fpsDisplay = document.getElementById('fps');
+    const controlStatus = document.getElementById('control-status');
+    const btnControl = document.getElementById('btn-control');
+    const btnReset = document.getElementById('btn-reset');
+    
+    let ws = null;
+    let hasControl = false;
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+    let signals = { yaw: 0, pitch: 0, zoom: 0, panX: 0, panY: 0 };
+    
+    let touchStart = null;
+    let lastTouchDistance = 0;
+    let mouseDown = false;
+    let lastMouse = { x: 0, y: 0 };
+    
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}`;
+      
+      overlayInfo.textContent = 'Connessione al server...';
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = 'blob';
+      
+      ws.onopen = () => {
+        console.log('WebSocket connesso');
+        overlayInfo.textContent = 'In attesa di stream...';
+        ws.send(JSON.stringify({ type: 'register', role: 'viewer' }));
+      };
+      
+      ws.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+          handleFrame(event.data);
+          return;
+        }
+        
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'control-granted') {
+            hasControl = true;
+            btnControl.textContent = 'Release Control';
+            btnControl.classList.add('active');
+            controlStatus.textContent = 'You have control';
+            controlStatus.classList.add('active');
+          }
+          else if (data.type === 'control-denied') {
+            alert('Controllo gia in uso da un altro client');
+          }
+          else if (data.type === 'control-released') {
+            hasControl = false;
+            btnControl.textContent = 'Take Control';
+            btnControl.classList.remove('active');
+            controlStatus.textContent = 'No control';
+            controlStatus.classList.remove('active');
+          }
+        } catch (e) {
+          console.error('Errore messaggio:', e);
+        }
+      };
+      
+      ws.onclose = () => {
+        overlayInfo.textContent = 'Connessione persa. Ricarica la pagina.';
+        overlay.classList.remove('hidden');
+      };
+      
+      ws.onerror = () => {
+        overlayInfo.textContent = 'Errore di connessione. Controlla il server.';
+      };
+    }
+    
+    function handleFrame(blob) {
+      createImageBitmap(blob).then(bitmap => {
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+        }
+        
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+          fpsDisplay.textContent = `FPS: ${frameCount}`;
+          frameCount = 0;
+          lastFpsTime = now;
+          
+          if (!overlay.classList.contains('hidden')) {
+            overlay.classList.add('hidden');
+          }
+        }
+      }).catch(err => {
+        console.error('Errore decodifica frame:', err);
+      });
+    }
+    
+    btnControl.addEventListener('click', () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!hasControl) {
+        ws.send(JSON.stringify({ type: 'request-control' }));
+      } else {
+        ws.send(JSON.stringify({ type: 'release-control' }));
+      }
+    });
+    
+    btnReset.addEventListener('click', () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'reset' }));
+      }
+    });
+    
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (!hasControl) return;
+      
+      if (e.touches.length === 1) {
+        touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastTouchDistance = Math.sqrt(dx * dx + dy * dy);
+      }
+    });
+    
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      if (!hasControl) return;
+      
+      if (e.touches.length === 1 && touchStart) {
+        const dx = e.touches[0].clientX - touchStart.x;
+        const dy = e.touches[0].clientY - touchStart.y;
+        signals.yaw += dx * 0.005;
+        signals.pitch += dy * 0.005;
+        touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (lastTouchDistance > 0) {
+          signals.zoom += (lastTouchDistance - dist) * 0.001;
+        }
+        
+        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        
+        if (touchStart) {
+          signals.panX += (cx - touchStart.x) * 0.01;
+          signals.panY += (cy - touchStart.y) * 0.01;
+        }
+        
+        lastTouchDistance = dist;
+        touchStart = { x: cx, y: cy };
+      }
+    });
+    
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      if (e.touches.length === 0) {
+        touchStart = null;
+        lastTouchDistance = 0;
+      }
+    });
+    
+    canvas.addEventListener('mousedown', (e) => {
+      if (!hasControl) return;
+      mouseDown = true;
+      lastMouse = { x: e.clientX, y: e.clientY };
+    });
+    
+    canvas.addEventListener('mousemove', (e) => {
+      if (!hasControl || !mouseDown) return;
+      
+      if (e.buttons === 1) {
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+        signals.yaw += dx * 0.005;
+        signals.pitch += dy * 0.005;
+      } else if (e.buttons === 4) {
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+        signals.panX += dx * 0.01;
+        signals.panY += dy * 0.01;
+      }
+      
+      lastMouse = { x: e.clientX, y: e.clientY };
+    });
+    
+    canvas.addEventListener('mouseup', () => { mouseDown = false; });
+    
+    canvas.addEventListener('wheel', (e) => {
+      if (!hasControl) return;
+      e.preventDefault();
+      signals.zoom += e.deltaY * 0.001;
+    }, { passive: false });
+    
+    setInterval(() => {
+      if (!hasControl || !ws || ws.readyState !== WebSocket.OPEN) return;
+      
+      const hasSignal = signals.yaw !== 0 || signals.pitch !== 0 || signals.zoom !== 0 || signals.panX !== 0 || signals.panY !== 0;
+      if (hasSignal) {
+        console.log('Invio segnale:', signals);
+        ws.send(JSON.stringify({
+          type: 'signal',
+          yaw: signals.yaw,
+          pitch: signals.pitch,
+          zoom: signals.zoom,
+          panX: signals.panX,
+          panY: signals.panY
+        }));
+        signals = { yaw: 0, pitch: 0, zoom: 0, panX: 0, panY: 0 };
+      }
+    }, 33);
+    
+    connect();
+  </script>
+</body>
+</html>
