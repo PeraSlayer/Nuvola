@@ -1045,37 +1045,65 @@ class App {
         console.log('[Stream] ✓ Dati ricevuti su connessione', conn.connectionId, ':', data);
         if (data.type === 'signal') {
           console.log('[Stream] Applicando segnale:', data);
+          const isFps = this.camera.activeMode === 'fps';
+          
           if (data.yaw) {
             console.log('[Stream] Yaw:', data.yaw);
-            this.camera.rotateHorizontal(data.yaw);
+            if (isFps) {
+              this.camera.orbit(data.yaw, 0);
+            } else {
+              this.camera.rotateHorizontal(data.yaw);
+            }
           }
           if (data.pitch) {
             console.log('[Stream] Pitch:', data.pitch);
-            this.camera.rotateVertical(data.pitch * 180 / Math.PI);
+            if (isFps) {
+              this.camera.orbit(0, data.pitch);
+            } else {
+              this.camera.rotateVertical(data.pitch * 180 / Math.PI);
+            }
           }
           if (data.zoom) {
             console.log('[Stream] Zoom:', data.zoom);
-            this.camera.zoom += data.zoom * 0.1;
-            this.camera.zoom = Math.max(0.1, Math.min(10, this.camera.zoom));
+            if (isFps) {
+              this.camera.dolly(1 - data.zoom * 0.1);
+            } else {
+              this.camera.zoom += data.zoom * 0.1;
+              this.camera.zoom = Math.max(0.1, Math.min(10, this.camera.zoom));
+            }
           }
-          if (data.panX) {
-            console.log('[Stream] PanX:', data.panX);
-            this.camera.panX += data.panX * 50;
-          }
-          if (data.panY) {
-            console.log('[Stream] PanY:', data.panY);
-            this.camera.panY += data.panY * 50;
+          if (data.panX || data.panY) {
+            console.log('[Stream] Pan:', data.panX, data.panY);
+            if (isFps) {
+              this.camera.pan(data.panX * 50, data.panY * 50);
+            } else {
+              this.camera.panX += (data.panX || 0) * 50;
+              this.camera.panY += (data.panY || 0) * 50;
+            }
           }
           this.camera.markDirty();
           console.log('[Stream] ✓ Camera aggiornata, markDirty() chiamato');
         }
+        else if (data.type === 'switchMode') {
+          console.log('[Stream] Cambio modalità ricevuto');
+          this.camera.switchMode();
+          this.fpsControls.enabled = this.camera.activeMode === 'fps';
+          if (this.cloud) this.camera.fitToBounds(this.cloud, this.renderer.width, this.renderer.height);
+          this.camera.markDirty();
+        }
         else if (data.type === 'reset') {
           console.log('[Stream] Reset view ricevuto');
-          this.camera.rotateHorizontal(-this.camera.rotAngle);
-          this.camera.rotateVertical(-this.camera.rotationXDeg);
-          this.camera.zoom = 1;
-          this.camera.panX = 0;
-          this.camera.panY = 0;
+          const isFps = this.camera.activeMode === 'fps';
+          if (isFps) {
+            this.camera.reset();
+            if (this.cloud) this.camera.fitToBounds(this.cloud, this.renderer.width, this.renderer.height);
+          } else {
+            this.camera.rotateHorizontal(-this.camera.rotAngle);
+            this.camera.rotateVertical(-this.camera.rotationXDeg);
+            this.camera.zoom = 1;
+            this.camera.panX = 0;
+            this.camera.panY = 0;
+          }
           this.camera.markDirty();
         }
         else if (data.type === 'ping') {

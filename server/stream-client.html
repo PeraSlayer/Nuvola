@@ -130,6 +130,18 @@
       color: #ff3b30;
     }
     
+    .btn-mode {
+      background: rgba(175, 82, 222, 0.2);
+      border-color: rgba(175, 82, 222, 0.4);
+      color: #af52de;
+    }
+    
+    .btn-mode.fps {
+      background: rgba(255, 159, 10, 0.2);
+      border-color: rgba(255, 159, 10, 0.4);
+      color: #ff9f0a;
+    }
+    
     .btn-reset {
       background: rgba(255, 255, 255, 0.1);
       border-color: rgba(255, 255, 255, 0.15);
@@ -158,6 +170,7 @@
   
   <div id="bottom-bar">
     <button class="btn btn-control" id="btn-control">Take Control</button>
+    <button class="btn btn-mode" id="btn-mode">Mode: Isometric</button>
     <button class="btn btn-reset" id="btn-reset">Reset View</button>
   </div>
 
@@ -177,6 +190,7 @@
     const fpsDisplay = document.getElementById('fps');
     const controlStatus = document.getElementById('control-status');
     const btnControl = document.getElementById('btn-control');
+    const btnMode = document.getElementById('btn-mode');
     const btnReset = document.getElementById('btn-reset');
     
     let peer = null;
@@ -370,6 +384,14 @@
     btnReset.addEventListener('click', () => {
       if (dataConn && dataConn.open) {
         dataConn.send({ type: 'reset' });
+      }
+    });
+    
+    btnMode.addEventListener('click', () => {
+      if (dataConn && dataConn.open) {
+        dataConn.send({ type: 'switchMode' });
+        btnMode.classList.toggle('fps');
+        btnMode.textContent = btnMode.classList.contains('fps') ? 'Mode: FPS' : 'Mode: Isometric';
       }
     });
     
