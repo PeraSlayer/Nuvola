@@ -1047,12 +1047,11 @@ class App {
           console.log('[Stream] Applicando segnale:', data);
           if (data.yaw) {
             console.log('[Stream] Yaw:', data.yaw);
-            this.camera._rotAngle += data.yaw;
+            this.camera.rotateHorizontal(data.yaw);
           }
           if (data.pitch) {
             console.log('[Stream] Pitch:', data.pitch);
-            this.camera.rotationXDeg += data.pitch * 180 / Math.PI;
-            this.camera.rotationXDeg = Math.max(-89, Math.min(89, this.camera.rotationXDeg));
+            this.camera.rotateVertical(data.pitch * 180 / Math.PI);
           }
           if (data.zoom) {
             console.log('[Stream] Zoom:', data.zoom);
@@ -1072,8 +1071,8 @@ class App {
         }
         else if (data.type === 'reset') {
           console.log('[Stream] Reset view ricevuto');
-          this.camera._rotAngle = 0;
-          this.camera.rotationXDeg = 0;
+          this.camera.rotateHorizontal(-this.camera.rotAngle);
+          this.camera.rotateVertical(-this.camera.rotationXDeg);
           this.camera.zoom = 1;
           this.camera.panX = 0;
           this.camera.panY = 0;
