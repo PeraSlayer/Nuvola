@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Nuvola Stream Host</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+  <style>
+    body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+    #glcanvas { position: fixed; left: -9999px; opacity: 0; }
+    #status {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      color: #0f0;
+      font-family: monospace;
+      font-size: 14px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 4px;
+      z-index: 1000;
+      max-width: 400px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas" width="1280" height="720"></canvas>
+  <div id="status">Inizializzazione...</div>
+
+  <script type="module">
+    import { PLYLoader } from '../script_js/file_loader/ply-loader.js';
+    import { LASLoader } from '../script_js/file_loader/las-loader.js';
+    import { decompressLAZ } from '../script_js/file_loader/laz-decompressor.js';
+    import { XYZLoader } from '../script_js/file_loader/xyz-loader.js';
+    import { E57Loader } from '../script_js/file_loader/e57-loader.js';
+    import { PointCloud } from '../script_js/model/PointCloud.js';
+    import { CameraController } from '../script_js/potree/CameraController.js';
+    import { Renderer } from '../script_js/rendering-app/renderer.js';
+    import { CloudTransform } from '../script_js/model/transform.js';
+
+    const canvas = document.getElementById('glcanvas');
+    const statusEl = document.getElementById('status');
+
+    const renderer = new Renderer(canvas, { preserveDrawingBuffer: true });
+    const camera = new CameraController(canvas.width, canvas.height);
+    const cloudTransform = new CloudTransform();
+    
+    let cloud = null;
+    let peer = null;
+    let ws = null;
+    let streaming = false;
+    let streamLoop = null;
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let mediaStream = null;
+
+    async function loadDefaultFile() {
+      statusEl.textContent = 'Caricamento points.ply...';
+      try {
+        const response = await fetch('../points.ply');
+        if (!response.ok) throw new Error('File non trovato');
+        
+        const blob = await response.blob();
+        const file = new File([blob], 'points.ply', { type: 'application/octet-stream' });
+        
+        const ext = 'ply';
+        let data;
+        
+        if (ext === 'ply') {
+          data = await new PLYLoader().load(file);
+        } else if (ext === 'las') {
+          data = await new LASLoader().load(file);
+        } else if (ext === 'laz') {
+          const buf = await file.arrayBuffer();
+          data = await new LASLoader().load(await decompressLAZ(buf));
+        } else if (ext === 'xyz' || ext === 'txt' || ext === 'pts') {
+          data = await new XYZLoader().load(file);
+        } else if (ext === 'e57') {
+          data = await new E57Loader().load(file);
+        }
+        
+        cloud = new PointCloud(data);
+        camera.fitToBounds(cloud, canvas.width, canvas.height);
+        cloudTransform.setCenter(cloud.center);
+        
+        statusEl.textContent = '✓ Point cloud caricato';
+        
+        return true;
+      } catch (err) {
+        statusEl.textContent = '✗ Errore: ' + err.message;
+        statusEl.style.color = '#f00';
+        console.error(err);
+        return false;
+      }
+    }
+
+    function initPeerJS() {
+      const peerId = 'nuvola-' + Math.random().toString(36).substr(2, 9);
+      statusEl.textContent = 'Inizializzazione PeerJS...';
+      
+      peer = new Peer(peerId, {
+        debug: 2
+      });
+
+      peer.on('open', (id) => {
+        console.log('[Host] Peer ID:', id);
+        statusEl.innerHTML = `✓ PeerJS pronto<br>ID: <code>${id}</code><br>In attesa di client...`;
+      });
+
+      peer.on('call', (call) => {
+        console.log('[Host] Client in chiamata');
+        call.answer(mediaStream);
+        
+        call.on('data', (data) => {
+          if (data.type === 'signal') {
+            if (data.yaw) camera._rotAngle += data.yaw;
+            if (data.pitch) {
+              camera.rotationXDeg += data.pitch * 180 / Math.PI;
+              camera.rotationXDeg = Math.max(-89, Math.min(89, camera.rotationXDeg));
+            }
+            if (data.zoom) {
+              camera.zoom += data.zoom * 0.1;
+              camera.zoom = Math.max(0.1, Math.min(10, camera.zoom));
+            }
+            if (data.panX) camera.panX += data.panX * 50;
+            if (data.panY) camera.panY += data.panY * 50;
+            camera.markDirty();
+          }
+          else if (data.type === 'reset') {
+            camera._rotAngle = 0;
+            camera.rotationXDeg = 0;
+            camera.zoom = 1;
+            camera.panX = 0;
+            camera.panY = 0;
+            camera.markDirty();
+          }
+        });
+        
+        call.on('close', () => {
+          console.log('[Host] Client disconnesso');
+        });
+        
+        call.on('error', (err) => {
+          console.error('[Host] Errore chiamata:', err);
+        });
+      });
+
+      peer.on('error', (err) => {
+        console.error('[Host] Errore PeerJS:', err);
+        statusEl.textContent = '✗ Errore PeerJS: ' + err.type;
+        statusEl.style.color = '#f00';
+      });
+    }
+
+    function startStreaming() {
+      if (streaming) return;
+      streaming = true;
+      console.log('[Host] Streaming avviato');
+      
+      mediaStream = canvas.captureStream(60);
+      streamLoop = requestAnimationFrame(renderLoop);
+    }
+
+    function stopStreaming() {
+      if (!streaming) return;
+      streaming = false;
+      
+      if (streamLoop) {
+        cancelAnimationFrame(streamLoop);
+        streamLoop = null;
+      }
+      
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream = null;
+      }
+      
+      console.log('[Host] Streaming fermato');
+    }
+
+    function renderLoop() {
+      if (!streaming) return;
+      
+      renderer.render(camera, cloud, {
+        colorMode: 0,
+        lightDir: [0.5, 0.5, 0.7],
+        ambient: 0.25,
+        shading: true,
+        useCloudTransform: false,
+        cloudRot: [0, 0, 0, 1],
+        cloudScale: 1,
+        pointSize: 3,
+        pointSizeType: 1,
+        sketchfabOpacity: 0,
+        dreamy: 0,
+        skyEnabled: true,
+        skyColorTop: '#6699e6',
+        skyColorBottom: '#b3d9ff',
+      });
+      
+      frameCount++;
+      const now = performance.now();
+      if (now - lastTime >= 1000) {
+        console.log(`[Host] Render FPS: ${frameCount}`);
+        frameCount = 0;
+        lastTime = now;
+      }
+      
+      streamLoop = requestAnimationFrame(renderLoop);
+    }
+
+    (async () => {
+      const loaded = await loadDefaultFile();
+      if (loaded) {
+        initPeerJS();
+        setTimeout(() => {
+          startStreaming();
+        }, 1000);
+      }
+    })();
+  </script>
+</body>
+</html>

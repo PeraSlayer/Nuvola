@@ -3,12 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Nuvola Stream</title>
+  <title>Nuvola Stream Client</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #000; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; touch-action: none; }
     
-    #canvas {
+    #video {
       width: 100vw;
       height: 100vh;
       display: block;
@@ -34,6 +35,21 @@
     
     .status { font-size: 28px; margin: 20px; text-align: center; font-weight: 600; }
     .info { font-size: 16px; color: #888; margin: 10px; text-align: center; max-width: 80%; }
+    
+    #peer-id-input {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 16px;
+      width: 300px;
+      max-width: 80%;
+      margin: 10px;
+      text-align: center;
+    }
+    
+    #peer-id-input::placeholder { color: rgba(255, 255, 255, 0.4); }
     
     #hud {
       position: fixed;
@@ -127,11 +143,13 @@
   </style>
 </head>
 <body>
-  <canvas id="canvas"></canvas>
+  <video id="video" autoplay playsinline></video>
   
   <div id="overlay">
     <div class="status">Nuvola Stream</div>
-    <div class="info" id="overlay-info">Connessione al server...</div>
+    <div class="info">Inserisci il Peer ID dell'host</div>
+    <input type="text" id="peer-id-input" placeholder="nuvola-xxxxxxxxx" />
+    <button class="btn" id="btn-connect">Connetti</button>
   </div>
   
   <div id="hud">
@@ -145,16 +163,18 @@
   </div>
 
   <script>
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    const video = document.getElementById('video');
     const overlay = document.getElementById('overlay');
     const overlayInfo = document.getElementById('overlay-info');
+    const peerIdInput = document.getElementById('peer-id-input');
+    const btnConnect = document.getElementById('btn-connect');
     const fpsDisplay = document.getElementById('fps');
     const controlStatus = document.getElementById('control-status');
     const btnControl = document.getElementById('btn-control');
     const btnReset = document.getElementById('btn-reset');
     
-    let ws = null;
+    let peer = null;
+    let call = null;
     let hasControl = false;
     let frameCount = 0;
     let lastFpsTime = performance.now();
@@ -165,111 +185,123 @@
     let mouseDown = false;
     let lastMouse = { x: 0, y: 0 };
     
-    function resizeCanvas() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    }
+    btnConnect.addEventListener('click', () => {
+      const peerId = peerIdInput.value.trim();
+      if (!peerId) {
+        alert('Inserisci un Peer ID');
+        return;
+      }
+      connectToHost(peerId);
+    });
     
-    window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
+    peerIdInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        btnConnect.click();
+      }
+    });
     
-    function connect() {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}`;
+    function connectToHost(hostPeerId) {
+      overlayInfo.textContent = 'Inizializzazione PeerJS...';
       
-      overlayInfo.textContent = 'Connessione al server...';
-      ws = new WebSocket(wsUrl);
-      ws.binaryType = 'blob';
+      peer = new Peer({
+        debug: 2
+      });
       
-      ws.onopen = () => {
-        console.log('WebSocket connesso');
-        overlayInfo.textContent = 'In attesa di stream...';
-        ws.send(JSON.stringify({ type: 'register', role: 'viewer' }));
-      };
-      
-      ws.onmessage = (event) => {
-        if (event.data instanceof Blob) {
-          handleFrame(event.data);
-          return;
-        }
+      peer.on('open', (id) => {
+        console.log('Client Peer ID:', id);
+        overlayInfo.textContent = 'Connessione all\'host...';
         
-        try {
-          const data = JSON.parse(event.data);
-          
-          if (data.type === 'control-granted') {
-            hasControl = true;
-            btnControl.textContent = 'Release Control';
-            btnControl.classList.add('active');
-            controlStatus.textContent = 'You have control';
-            controlStatus.classList.add('active');
-          }
-          else if (data.type === 'control-denied') {
-            alert('Controllo gia in uso da un altro client');
-          }
-          else if (data.type === 'control-released') {
-            hasControl = false;
-            btnControl.textContent = 'Take Control';
-            btnControl.classList.remove('active');
-            controlStatus.textContent = 'No control';
-            controlStatus.classList.remove('active');
-          }
-        } catch (e) {
-          console.error('Errore messaggio:', e);
-        }
-      };
-      
-      ws.onclose = () => {
-        overlayInfo.textContent = 'Connessione persa. Ricarica la pagina.';
-        overlay.classList.remove('hidden');
-      };
-      
-      ws.onerror = () => {
-        overlayInfo.textContent = 'Errore di connessione. Controlla il server.';
-      };
-    }
-    
-    function handleFrame(blob) {
-      createImageBitmap(blob).then(bitmap => {
-        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-        }
+        call = peer.call(hostPeerId, new MediaStream());
         
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
-        
-        frameCount++;
-        const now = performance.now();
-        if (now - lastFpsTime >= 1000) {
-          fpsDisplay.textContent = `FPS: ${frameCount}`;
-          frameCount = 0;
-          lastFpsTime = now;
-          
-          if (!overlay.classList.contains('hidden')) {
+        call.on('stream', (remoteStream) => {
+          console.log('Stream ricevuto');
+          video.srcObject = remoteStream;
+          video.play().then(() => {
+            console.log('Video in riproduzione');
             overlay.classList.add('hidden');
-          }
-        }
-      }).catch(err => {
-        console.error('Errore decodifica frame:', err);
+            startFpsCounter();
+          }).catch(err => {
+            console.warn('Autoplay bloccato, retry su interazione:', err);
+            overlayInfo.textContent = 'Tocca per avviare lo stream';
+            overlay.style.cursor = 'pointer';
+            
+            const startStream = () => {
+              video.play().then(() => {
+                console.log('Video avviato dopo interazione');
+                overlay.classList.add('hidden');
+                overlay.style.cursor = '';
+                startFpsCounter();
+              }).catch(playErr => {
+                console.error('Errore play:', playErr);
+                overlayInfo.textContent = 'Errore: ricarica la pagina';
+              });
+              overlay.removeEventListener('click', startStream);
+              overlay.removeEventListener('touchstart', startStream);
+            };
+            
+            overlay.addEventListener('click', startStream);
+            overlay.addEventListener('touchstart', startStream);
+          });
+        });
+        
+        call.on('close', () => {
+          console.log('Chiamata chiusa');
+          overlayInfo.textContent = 'Connessione terminata';
+          overlay.classList.remove('hidden');
+        });
+        
+        call.on('error', (err) => {
+          console.error('Errore chiamata:', err);
+          overlayInfo.textContent = 'Errore: ' + err.message;
+        });
+      });
+      
+      peer.on('error', (err) => {
+        console.error('Errore PeerJS:', err);
+        overlayInfo.textContent = 'Errore: ' + err.type;
       });
     }
     
+    function startFpsCounter() {
+      const checkFrame = () => {
+        if (video.readyState >= 2) {
+          frameCount++;
+          const now = performance.now();
+          if (now - lastFpsTime >= 1000) {
+            fpsDisplay.textContent = `FPS: ${frameCount}`;
+            frameCount = 0;
+            lastFpsTime = now;
+          }
+        }
+        requestAnimationFrame(checkFrame);
+      };
+      requestAnimationFrame(checkFrame);
+    }
+    
     btnControl.addEventListener('click', () => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      if (!hasControl) {
-        ws.send(JSON.stringify({ type: 'request-control' }));
+      if (!call) return;
+      hasControl = !hasControl;
+      
+      if (hasControl) {
+        btnControl.textContent = 'Release Control';
+        btnControl.classList.add('active');
+        controlStatus.textContent = 'You have control';
+        controlStatus.classList.add('active');
       } else {
-        ws.send(JSON.stringify({ type: 'release-control' }));
+        btnControl.textContent = 'Take Control';
+        btnControl.classList.remove('active');
+        controlStatus.textContent = 'No control';
+        controlStatus.classList.remove('active');
       }
     });
     
     btnReset.addEventListener('click', () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'reset' }));
+      if (call) {
+        call.send({ type: 'reset' });
       }
     });
     
-    canvas.addEventListener('touchstart', (e) => {
+    video.addEventListener('touchstart', (e) => {
       e.preventDefault();
       if (!hasControl) return;
       
@@ -282,7 +314,7 @@
       }
     });
     
-    canvas.addEventListener('touchmove', (e) => {
+    video.addEventListener('touchmove', (e) => {
       e.preventDefault();
       if (!hasControl) return;
       
@@ -314,7 +346,7 @@
       }
     });
     
-    canvas.addEventListener('touchend', (e) => {
+    video.addEventListener('touchend', (e) => {
       e.preventDefault();
       if (e.touches.length === 0) {
         touchStart = null;
@@ -322,13 +354,13 @@
       }
     });
     
-    canvas.addEventListener('mousedown', (e) => {
+    video.addEventListener('mousedown', (e) => {
       if (!hasControl) return;
       mouseDown = true;
       lastMouse = { x: e.clientX, y: e.clientY };
     });
     
-    canvas.addEventListener('mousemove', (e) => {
+    video.addEventListener('mousemove', (e) => {
       if (!hasControl || !mouseDown) return;
       
       if (e.buttons === 1) {
@@ -346,33 +378,30 @@
       lastMouse = { x: e.clientX, y: e.clientY };
     });
     
-    canvas.addEventListener('mouseup', () => { mouseDown = false; });
+    video.addEventListener('mouseup', () => { mouseDown = false; });
     
-    canvas.addEventListener('wheel', (e) => {
+    video.addEventListener('wheel', (e) => {
       if (!hasControl) return;
       e.preventDefault();
       signals.zoom += e.deltaY * 0.001;
     }, { passive: false });
     
     setInterval(() => {
-      if (!hasControl || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!hasControl || !call) return;
       
       const hasSignal = signals.yaw !== 0 || signals.pitch !== 0 || signals.zoom !== 0 || signals.panX !== 0 || signals.panY !== 0;
       if (hasSignal) {
-        console.log('Invio segnale:', signals);
-        ws.send(JSON.stringify({
+        call.send({
           type: 'signal',
           yaw: signals.yaw,
           pitch: signals.pitch,
           zoom: signals.zoom,
           panX: signals.panX,
           panY: signals.panY
-        }));
+        });
         signals = { yaw: 0, pitch: 0, zoom: 0, panX: 0, panY: 0 };
       }
     }, 33);
-    
-    connect();
   </script>
 </body>
 </html>
