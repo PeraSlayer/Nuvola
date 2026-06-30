@@ -1035,14 +1035,14 @@ class App {
     });
     
     this._streamPeer.on('connection', (conn) => {
-      console.log('[Stream] ✓ Connessione dati ricevuta da client');
+      console.log('[Stream] ✓ Connessione dati ricevuta da client, ID:', conn.connectionId);
       
       conn.on('open', () => {
-        console.log('[Stream] ✓ Connessione dati aperta');
+        console.log('[Stream] ✓ Connessione dati aperta, ID:', conn.connectionId);
       });
       
       conn.on('data', (data) => {
-        console.log('[Stream] ✓ Dati ricevuti:', data);
+        console.log('[Stream] ✓ Dati ricevuti su connessione', conn.connectionId, ':', data);
         if (data.type === 'signal') {
           console.log('[Stream] Applicando segnale:', data);
           if (data.yaw) {
@@ -1080,12 +1080,12 @@ class App {
           this.camera.markDirty();
         }
         else if (data.type === 'ping') {
-          console.log('[Stream] Ping ricevuto dal client');
+          console.log('[Stream] Ping ricevuto dal client su connessione', conn.connectionId);
         }
       });
       
       conn.on('close', () => {
-        console.log('[Stream] Connessione dati chiusa');
+        console.log('[Stream] Connessione dati chiusa, ID:', conn.connectionId);
       });
       
       conn.on('error', (err) => {

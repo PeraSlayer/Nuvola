@@ -276,7 +276,7 @@
         dataConn = peer.connect(hostPeerId);
         
         dataConn.on('open', () => {
-          console.log('[Client] ✓ Connessione dati aperta');
+          console.log('[Client] ✓ Connessione dati aperta, ID:', dataConn.connectionId);
         });
         
         dataConn.on('error', (err) => {
@@ -480,7 +480,7 @@
         
         try {
           dataConn.send(signalData);
-          console.log('[Client] ✓ Segnale inviato:', signalData);
+          console.log('[Client] ✓ Segnale inviato su connessione', dataConn.connectionId, ':', signalData);
           signals = { yaw: 0, pitch: 0, zoom: 0, panX: 0, panY: 0 };
         } catch (err) {
           console.error('[Client] Errore invio segnale:', err);
@@ -489,13 +489,13 @@
     }, 33);
     
     setInterval(() => {
-      if (!dataConn || !dataConn.open) return;
-      try {
-        dataConn.send({ type: 'ping', timestamp: Date.now() });
-      } catch (err) {
-        console.error('[Client] Errore heartbeat:', err);
-      }
-    }, 1000);
+      console.log('[Client] Stato connessione dati:', {
+        exists: !!dataConn,
+        open: dataConn ? dataConn.open : false,
+        id: dataConn ? dataConn.connectionId : null,
+        hasControl: hasControl
+      });
+    }, 5000);
   </script>
 </body>
 </html>
