@@ -86,7 +86,6 @@
         
         cloud = new PointCloud(data);
         camera.fitToBounds(cloud, canvas.width, canvas.height);
-        cloudTransform.setCenter(cloud.center);
         
         statusEl.textContent = '✓ Point cloud caricato';
         
