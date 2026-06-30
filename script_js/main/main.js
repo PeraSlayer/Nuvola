@@ -380,17 +380,21 @@ class App {
 
   _resize() {
     const main = document.getElementById('main');
-    const w = main.clientWidth, h = main.clientHeight;
-    this.renderer.resize(w, h);
+    const containerW = main.clientWidth, containerH = main.clientHeight;
+    
+    const STREAM_WIDTH = 1280;
+    const STREAM_HEIGHT = 720;
+    
+    this.renderer.resize(STREAM_WIDTH, STREAM_HEIGHT);
     this.camera.setViewport(this.renderer.width, this.renderer.height);
     this.overlayCanvas.width  = this.renderer.width;
     this.overlayCanvas.height = this.renderer.height;
-    this.overlayCanvas.style.width  = w + 'px';
-    this.overlayCanvas.style.height = h + 'px';
+    this.overlayCanvas.style.width  = containerW + 'px';
+    this.overlayCanvas.style.height = containerH + 'px';
     this.threeCanvas.width  = this.renderer.width;
     this.threeCanvas.height = this.renderer.height;
-    this.threeCanvas.style.width  = w + 'px';
-    this.threeCanvas.style.height = h + 'px';
+    this.threeCanvas.style.width  = containerW + 'px';
+    this.threeCanvas.style.height = containerH + 'px';
     this.threeOverlay.setSize(this.renderer.width, this.renderer.height);
     if (this.cloud) this._fitView();
     this.camera.markDirty();
@@ -1134,6 +1138,37 @@ class App {
       call.on('stream', (remoteStream) => {
         console.log('[Stream] Stream remoto ricevuto');
       });
+      
+      const setHighBitrate = () => {
+        const pc = call.peerConnection;
+        if (!pc) {
+          console.warn('[Stream] PeerConnection non disponibile');
+          return;
+        }
+        
+        const senders = pc.getSenders();
+        senders.forEach(sender => {
+          if (sender.track && sender.track.kind === 'video') {
+            const params = sender.getParameters();
+            if (!params.encodings) {
+              params.encodings = [{}];
+            }
+            params.encodings[0].maxBitrate = 8000000;
+            params.encodings[0].maxFramerate = 60;
+            params.encodings[0].scaleResolutionDownBy = 1.0;
+            
+            sender.setParameters(params)
+              .then(() => {
+                console.log('[Stream] ✓ Bitrate impostato a 8 Mbps');
+              })
+              .catch(err => {
+                console.error('[Stream] Errore impostazione bitrate:', err);
+              });
+          }
+        });
+      };
+      
+      setTimeout(setHighBitrate, 1000);
       
       call.on('close', () => {
         console.log('[Stream] Client disconnesso');
