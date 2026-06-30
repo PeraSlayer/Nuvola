@@ -67,22 +67,21 @@
         if (!response.ok) throw new Error('File non trovato');
         
         const blob = await response.blob();
-        const file = new File([blob], 'points.ply', { type: 'application/octet-stream' });
+        const buf = await blob.arrayBuffer();
         
         const ext = 'ply';
         let data;
         
         if (ext === 'ply') {
-          data = await new PLYLoader().load(file);
+          data = await new PLYLoader().load(buf);
         } else if (ext === 'las') {
-          data = await new LASLoader().load(file);
+          data = await new LASLoader().load(buf);
         } else if (ext === 'laz') {
-          const buf = await file.arrayBuffer();
           data = await new LASLoader().load(await decompressLAZ(buf));
         } else if (ext === 'xyz' || ext === 'txt' || ext === 'pts') {
-          data = await new XYZLoader().load(file);
+          data = await new XYZLoader().load(buf);
         } else if (ext === 'e57') {
-          data = await new E57Loader().load(file);
+          data = await new E57Loader().load(buf);
         }
         
         cloud = new PointCloud(data);
