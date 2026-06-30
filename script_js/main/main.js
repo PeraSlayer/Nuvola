@@ -218,7 +218,7 @@ class App {
     this._tilingMode = false;
     
     // Streaming
-    this._streamWs = null;
+    this._streamPeer = null;
     this._streaming = false;
     this._streamQuality = 0.5;
     this._streamLoop = null;
@@ -490,8 +490,10 @@ class App {
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
       document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-      document.getElementById('rot-offset').value = this.camera.viewOffsetDeg;
-      document.getElementById('rot-offset-val').textContent = this.camera.viewOffsetDeg + '°';
+      const rotOffset2 = document.getElementById('rot-offset');
+      if (rotOffset2) rotOffset2.value = this.camera.viewOffsetDeg;
+      const rotOffsetVal2 = document.getElementById('rot-offset-val');
+      if (rotOffsetVal2) rotOffsetVal2.textContent = this.camera.viewOffsetDeg + '°';
       document.getElementById('file-info').innerHTML =
         `${url}<br/>${this.cloud.count.toLocaleString()} points<br/>Potree v2.0 (streaming)<br/>` +
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
@@ -773,8 +775,10 @@ class App {
 
       document.getElementById('zoom-slider').value = this.camera.zoom;
       document.getElementById('zoom-val').textContent = this.camera.zoom.toFixed(1);
-      document.getElementById('rot-offset').value = this.camera.viewOffsetDeg;
-      document.getElementById('rot-offset-val').textContent = this.camera.viewOffsetDeg + '°';
+      const rotOffset = document.getElementById('rot-offset');
+      if (rotOffset) rotOffset.value = this.camera.viewOffsetDeg;
+      const rotOffsetVal = document.getElementById('rot-offset-val');
+      if (rotOffsetVal) rotOffsetVal.textContent = this.camera.viewOffsetDeg + '°';
       document.getElementById('file-info').innerHTML =
         `${file.name}<br/>${this.cloud.count.toLocaleString()} points<br/>${format}<br/>` +
         (this.cloud.hasColor ? 'RGB ✓  ' : '') +
@@ -1003,18 +1007,19 @@ class App {
   async startStreaming() {
     if (this._streaming) return;
     
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+    const peerId = '1';
+    console.log('[Stream] Inizializzazione PeerJS con ID:', peerId);
     
-    console.log('[Stream] Connessione a:', wsUrl);
-    this._streamWs = new WebSocket(wsUrl);
-    this._streamWs.binaryType = 'arraybuffer';
+    this._streamPeer = new Peer(peerId, {
+      host: window.location.hostname,
+      port: 3001,
+      path: '/peerjs',
+      debug: 2
+    });
     
-    this._streamWs.onopen = () => {
-      console.log('[Stream] ✓ Connesso al server');
+    this._streamPeer.on('open', (id) => {
+      console.log('[Stream] ✓ PeerJS pronto, ID:', id);
       this._streaming = true;
-      
-      this._streamWs.send(JSON.stringify({ type: 'register', role: 'host' }));
       
       const btn = document.getElementById('btn-stream');
       if (btn) {
@@ -1024,120 +1029,102 @@ class App {
       
       const info = document.getElementById('stream-info');
       if (info) {
-        info.textContent = 'Streaming attivo ✓ (WebSocket 60fps)';
+        info.textContent = 'Streaming attivo ✓ (WebRTC 60fps)';
         info.style.color = '#34c759';
       }
-      
-      this._startCaptureLoop();
-    };
+    });
     
-    this._streamWs.onmessage = (event) => {
-      try {
-        if (event.data instanceof Blob) return;
-        if (event.data instanceof ArrayBuffer) return;
-        
-        const data = JSON.parse(event.data);
-        
+    this._streamPeer.on('connection', (conn) => {
+      console.log('[Stream] ✓ Connessione dati ricevuta da client');
+      
+      conn.on('open', () => {
+        console.log('[Stream] ✓ Connessione dati aperta');
+      });
+      
+      conn.on('data', (data) => {
+        console.log('[Stream] ✓ Dati ricevuti:', data);
         if (data.type === 'signal') {
-          console.log('[Stream] Segnale ricevuto:', data);
-          if (this.camera) {
-            if (data.yaw) {
-              this.camera._rotAngle += data.yaw;
-            }
-            if (data.pitch) {
-              this.camera.rotationXDeg += data.pitch * 180 / Math.PI;
-              this.camera.rotationXDeg = Math.max(-89, Math.min(89, this.camera.rotationXDeg));
-            }
-            if (data.zoom) {
-              this.camera.zoom += data.zoom * 0.1;
-              this.camera.zoom = Math.max(0.1, Math.min(10, this.camera.zoom));
-            }
-            if (data.panX) {
-              this.camera.panX += data.panX * 50;
-            }
-            if (data.panY) {
-              this.camera.panY += data.panY * 50;
-            }
-            this.camera.markDirty();
+          console.log('[Stream] Applicando segnale:', data);
+          if (data.yaw) {
+            console.log('[Stream] Yaw:', data.yaw);
+            this.camera._rotAngle += data.yaw;
           }
+          if (data.pitch) {
+            console.log('[Stream] Pitch:', data.pitch);
+            this.camera.rotationXDeg += data.pitch * 180 / Math.PI;
+            this.camera.rotationXDeg = Math.max(-89, Math.min(89, this.camera.rotationXDeg));
+          }
+          if (data.zoom) {
+            console.log('[Stream] Zoom:', data.zoom);
+            this.camera.zoom += data.zoom * 0.1;
+            this.camera.zoom = Math.max(0.1, Math.min(10, this.camera.zoom));
+          }
+          if (data.panX) {
+            console.log('[Stream] PanX:', data.panX);
+            this.camera.panX += data.panX * 50;
+          }
+          if (data.panY) {
+            console.log('[Stream] PanY:', data.panY);
+            this.camera.panY += data.panY * 50;
+          }
+          this.camera.markDirty();
+          console.log('[Stream] ✓ Camera aggiornata, markDirty() chiamato');
         }
         else if (data.type === 'reset') {
-          if (this.camera) {
-            this.camera._rotAngle = 0;
-            this.camera.rotationXDeg = 0;
-            this.camera.zoom = 1;
-            this.camera.panX = 0;
-            this.camera.panY = 0;
-            this.camera.markDirty();
-          }
+          console.log('[Stream] Reset view ricevuto');
+          this.camera._rotAngle = 0;
+          this.camera.rotationXDeg = 0;
+          this.camera.zoom = 1;
+          this.camera.panX = 0;
+          this.camera.panY = 0;
+          this.camera.markDirty();
         }
-      } catch (error) {
-        console.error('[Stream] Errore segnale:', error);
-      }
-    };
+        else if (data.type === 'ping') {
+          console.log('[Stream] Ping ricevuto dal client');
+        }
+      });
+      
+      conn.on('close', () => {
+        console.log('[Stream] Connessione dati chiusa');
+      });
+      
+      conn.on('error', (err) => {
+        console.error('[Stream] Errore connessione dati:', err);
+      });
+    });
     
-    this._streamWs.onclose = () => {
-      console.log('[Stream] Connessione chiusa');
-      this.stopStreaming();
-    };
+    this._streamPeer.on('call', (call) => {
+      console.log('[Stream] Client in chiamata');
+      
+      const mediaStream = this.canvas.captureStream(60);
+      mediaStream.getTracks().forEach((track, i) => {
+        console.log(`[Stream] Track ${i}:`, track.kind, track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
+      });
+
+      call.answer(mediaStream);
+      console.log('[Stream] Risposta inviata con media stream');
+      
+      call.on('stream', (remoteStream) => {
+        console.log('[Stream] Stream remoto ricevuto');
+      });
+      
+      call.on('close', () => {
+        console.log('[Stream] Client disconnesso');
+      });
+      
+      call.on('error', (err) => {
+        console.error('[Stream] Errore chiamata:', err);
+      });
+    });
     
-    this._streamWs.onerror = (error) => {
-      console.error('[Stream] Errore WebSocket:', error);
+    this._streamPeer.on('error', (err) => {
+      console.error('[Stream] Errore PeerJS:', err);
       const info = document.getElementById('stream-info');
       if (info) {
-        info.textContent = 'Errore di connessione';
+        info.textContent = 'Errore: ' + err.type;
         info.style.color = '#ff3b30';
       }
-    };
-  }
-
-  _startCaptureLoop() {
-    let frameCount = 0;
-    let lastTime = performance.now();
-    let encodeTimes = [];
-    
-    const captureFrame = () => {
-      if (!this._streaming || !this._streamWs || this._streamWs.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      
-      const startTime = performance.now();
-      
-      this.canvas.toBlob((blob) => {
-        if (blob && this._streamWs && this._streamWs.readyState === WebSocket.OPEN) {
-          this._streamWs.send(blob);
-          
-          const encodeTime = performance.now() - startTime;
-          encodeTimes.push(encodeTime);
-          if (encodeTimes.length > 10) encodeTimes.shift();
-          
-          // Adatta qualità in base al tempo di encoding
-          const avgEncodeTime = encodeTimes.reduce((a, b) => a + b, 0) / encodeTimes.length;
-          if (avgEncodeTime > 20 && this._streamQuality > 0.3) {
-            this._streamQuality = Math.max(0.3, this._streamQuality - 0.05);
-          } else if (avgEncodeTime < 10 && this._streamQuality < 0.7) {
-            this._streamQuality = Math.min(0.7, this._streamQuality + 0.02);
-          }
-          
-          // Log ogni secondo
-          frameCount++;
-          const now = performance.now();
-          if (now - lastTime >= 1000) {
-            console.log(`[Stream] FPS: ${frameCount}, size: ${(blob.size / 1024).toFixed(1)}KB, encode: ${avgEncodeTime.toFixed(1)}ms, quality: ${(this._streamQuality * 100).toFixed(0)}%`);
-            frameCount = 0;
-            lastTime = now;
-          }
-        }
-      }, 'image/webp', this._streamQuality);
-      
-      this._streamLoop = requestAnimationFrame(captureFrame);
-    };
-    
-    this._streamLoop = requestAnimationFrame(captureFrame);
-  }
-
-  _createPeerConnection(viewerId) {
-    // Non più necessario con WebSocket
+    });
   }
 
   stopStreaming() {
@@ -1145,14 +1132,9 @@ class App {
     
     this._streaming = false;
     
-    if (this._streamLoop) {
-      cancelAnimationFrame(this._streamLoop);
-      this._streamLoop = null;
-    }
-    
-    if (this._streamWs) {
-      this._streamWs.close();
-      this._streamWs = null;
+    if (this._streamPeer) {
+      this._streamPeer.destroy();
+      this._streamPeer = null;
     }
     
     const btn = document.getElementById('btn-stream');

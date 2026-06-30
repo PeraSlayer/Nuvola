@@ -1,22 +1,17 @@
 import express from 'express';
-import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PeerServer } from 'peer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
 
 const PORT = 3000;
-
-let connectedClients = new Map();
-let host = null;
-let viewers = new Set();
-let currentController = null;
+const PEER_PORT = 3001;
 
 // Servo i file statici dalla root del progetto
 app.use(express.static(path.join(__dirname, '..')));
@@ -49,11 +44,11 @@ app.get('/info', (req, res) => {
       <h1>Nuvola Stream Server</h1>
       <div class="info">
         <h2>Server Status: Running <span class="badge">OK</span></h2>
-        <p>Porta: <code>${PORT}</code></p>
-        <p>Client connessi: <code>${connectedClients.size}</code></p>
+        <p>Porta HTTP: <code>${PORT}</code></p>
+        <p>Porta PeerJS: <code>${PEER_PORT}</code></p>
       </div>
       <div class="info">
-        <h2>Streaming WebSocket 60fps</h2>
+        <h2>Streaming WebRTC (Peer-to-Peer)</h2>
         <p>Da qualsiasi dispositivo sulla stessa rete WiFi:</p>
         <p><code>http://&lt;IP-DEL-TUO-PC&gt;:${PORT}/stream-client.html</code></p>
         <p>Sostituisci <code>&lt;IP-DEL-TUO-PC&gt;</code> con l'indirizzo IP del tuo computer.</p>
@@ -72,157 +67,34 @@ app.get('/info', (req, res) => {
   `);
 });
 
-// Gestisci connessioni WebSocket
-wss.on('connection', (ws) => {
-  const clientId = Math.random().toString(36).substr(2, 9);
-  console.log('🔗 Client connesso:', clientId);
-  connectedClients.set(clientId, ws);
-  
-  ws.on('close', () => {
-    console.log('🔌 Client disconnesso:', clientId);
-    
-    // Cleanup host
-    if (host === ws) {
-      host = null;
-      console.log('Host disconnesso');
-    }
-    
-    // Cleanup viewer
-    if (viewers.has(ws)) {
-      viewers.delete(ws);
-    }
-    
-    // Rilascia controllo se il controller si disconnette
-    if (currentController === clientId) {
-      currentController = null;
-      broadcastControlMessage({ type: 'control-released' });
-      console.log('Controllo rilasciato (controller disconnesso)');
-    }
-    
-    connectedClients.delete(clientId);
-  });
-
-  ws.on('error', (error) => {
-    console.error('Errore WebSocket:', error);
-    connectedClients.delete(clientId);
-    if (host === ws) host = null;
-    if (viewers.has(ws)) viewers.delete(ws);
-    if (currentController === clientId) {
-      currentController = null;
-      broadcastControlMessage({ type: 'control-released' });
-    }
-  });
-  
-  ws.on('message', (message, isBinary) => {
-    // Se è un messaggio binario (frame video), inoltra a tutti i viewer
-    if (isBinary) {
-      viewers.forEach(viewer => {
-        if (viewer.readyState === 1 && viewer !== ws) {
-          viewer.send(message, { binary: true });
-        }
-      });
-      return;
-    }
-    
-    try {
-      const messageStr = message.toString();
-      const data = JSON.parse(messageStr);
-      
-      // Registrazione ruolo
-      if (data.type === 'register') {
-        if (data.role === 'host') {
-          host = ws;
-          console.log('✓ Host registrato:', clientId);
-        } else if (data.role === 'viewer') {
-          viewers.add(ws);
-          console.log('✓ Viewer registrato:', clientId);
-          
-          // Notifica host che un nuovo viewer si è connesso
-          if (host && host.readyState === 1) {
-            host.send(JSON.stringify({
-              type: 'viewer-joined',
-              viewerId: clientId
-            }));
-          }
-        }
-        return;
-      }
-      
-      // Signaling WebRTC
-      if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice-candidate') {
-        if (data.target === 'host' && host && host.readyState === 1) {
-          host.send(JSON.stringify({ ...data, senderId: clientId }));
-        } else if (data.target === 'viewer' && data.viewerId) {
-          // Trova il viewer specifico
-          for (const [id, client] of connectedClients) {
-            if (id === data.viewerId && client.readyState === 1) {
-              client.send(JSON.stringify({ ...data, senderId: clientId }));
-              break;
-            }
-          }
-        }
-        return;
-      }
-      
-      // Gestione controllo
-      if (data.type === 'request-control') {
-        if (currentController === null) {
-          currentController = clientId;
-          broadcastControlMessage({ 
-            type: 'control-granted', 
-            controllerId: clientId 
-          });
-          console.log('✓ Controllo concesso a:', clientId);
-        } else {
-          ws.send(JSON.stringify({ type: 'control-denied' }));
-          console.log('✗ Controllo negato a:', clientId, '(già in uso)');
-        }
-        return;
-      }
-      
-      if (data.type === 'release-control') {
-        if (currentController === clientId) {
-          currentController = null;
-          broadcastControlMessage({ type: 'control-released' });
-          console.log('✓ Controllo rilasciato da:', clientId);
-        }
-        return;
-      }
-      
-      // Inoltra segnali di controllo solo dal controller autorizzato
-      if (data.type === 'signal' && currentController === clientId && host && host.readyState === 1) {
-        host.send(JSON.stringify({ ...data, senderId: clientId }));
-        return;
-      }
-      
-      // Altri messaggi (backward compatibility)
-      connectedClients.forEach((client, id) => {
-        if (id !== clientId && client.readyState === 1) {
-          client.send(messageStr);
-        }
-      });
-    } catch (error) {
-      console.error('Errore parsing messaggio:', error);
-    }
-  });
+// Avvia il server PeerJS standalone
+const peerServer = PeerServer({
+  port: PEER_PORT,
+  path: '/peerjs',
+  allow_discovery: false,
+  concurrent_limit: 10000
 });
 
-function broadcastControlMessage(msg) {
-  const message = JSON.stringify(msg);
-  connectedClients.forEach(client => {
-    if (client.readyState === 1) {
-      client.send(message);
-    }
-  });
-}
+peerServer.on('connection', (client) => {
+  console.log('🔗 Peer connesso:', client.getId());
+});
 
-// Avvia il server
+peerServer.on('disconnect', (client) => {
+  console.log('🔌 Peer disconnesso:', client.getId());
+});
+
+peerServer.on('error', (error) => {
+  console.error('❌ Errore PeerJS:', error);
+});
+
+// Avvia il server HTTP
 server.listen(PORT, () => {
   console.log(`\n  Nuvola Stream Server`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  console.log(`  Server attivo su http://localhost:${PORT}`);
+  console.log(`  Server HTTP: http://localhost:${PORT}`);
+  console.log(`  Server PeerJS: ws://localhost:${PEER_PORT}/peerjs`);
   console.log(`  Info: http://localhost:${PORT}/info`);
-  console.log(`\n  Streaming WebSocket 60fps:`);
+  console.log(`\n  Streaming WebRTC (Peer-to-Peer):`);
   console.log(`  1. Avvia streaming dal viewer (Start Streaming)`);
   console.log(`  2. Su qualsiasi dispositivo: http://<IP-PC>:${PORT}/stream-client.html`);
   console.log(`  3. Premi "Take Control" per interagire`);
@@ -232,5 +104,7 @@ server.listen(PORT, () => {
 // Gestione chiusura graceful
 process.on('SIGINT', () => {
   console.log('\n🛑 Chiusura server...');
+  peerServer.close();
+  server.close();
   process.exit(0);
 });

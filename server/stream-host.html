@@ -47,7 +47,10 @@
     const canvas = document.getElementById('glcanvas');
     const statusEl = document.getElementById('status');
 
-    const renderer = new Renderer(canvas, { preserveDrawingBuffer: true });
+    const renderer = new Renderer(canvas);
+    renderer.resize(1280, 720);
+    console.log('[Host] Canvas dimensions:', canvas.width, 'x', canvas.height);
+    console.log('[Host] Renderer dimensions:', renderer.width, 'x', renderer.height);
     const camera = new CameraController(canvas.width, canvas.height);
     const cloudTransform = new CloudTransform();
     
@@ -85,7 +88,11 @@
         }
         
         cloud = new PointCloud(data);
+        console.log('[Host] PointCloud creata, punti:', cloud.count);
+        renderer.uploadPointCloud(cloud);
+        console.log('[Host] PointCloud caricata nella GPU');
         camera.fitToBounds(cloud, canvas.width, canvas.height);
+        console.log('[Host] Camera fitToBounds completata');
         
         statusEl.textContent = '✓ Point cloud caricato';
         
@@ -99,10 +106,13 @@
     }
 
     function initPeerJS() {
-      const peerId = 'nuvola-' + Math.random().toString(36).substr(2, 9);
+      const peerId = '1';
       statusEl.textContent = 'Inizializzazione PeerJS...';
       
       peer = new Peer(peerId, {
+        host: window.location.hostname,
+        port: 3001,
+        path: '/peerjs',
         debug: 2
       });
 
@@ -113,9 +123,18 @@
 
       peer.on('call', (call) => {
         console.log('[Host] Client in chiamata');
+        console.log('[Host] MediaStream da inviare:', mediaStream);
+        console.log('[Host] MediaStream tracks:', mediaStream.getTracks().length);
+        console.log('[Host] Rispondo alla chiamata...');
         call.answer(mediaStream);
+        console.log('[Host] Risposta inviata');
+        
+        call.on('stream', (remoteStream) => {
+          console.log('[Host] Stream remoto ricevuto (non dovrebbe succedere)');
+        });
         
         call.on('data', (data) => {
+          console.log('[Host] Dati ricevuti dal client:', data);
           if (data.type === 'signal') {
             if (data.yaw) camera._rotAngle += data.yaw;
             if (data.pitch) {
@@ -162,6 +181,11 @@
       console.log('[Host] Streaming avviato');
       
       mediaStream = canvas.captureStream(60);
+      console.log('[Host] MediaStream tracks:', mediaStream.getTracks().length);
+      mediaStream.getTracks().forEach((track, i) => {
+        console.log(`[Host] Track ${i}:`, track.kind, track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
+      });
+      
       streamLoop = requestAnimationFrame(renderLoop);
     }
 
@@ -198,14 +222,19 @@
         sketchfabOpacity: 0,
         dreamy: 0,
         skyEnabled: true,
-        skyColorTop: '#6699e6',
-        skyColorBottom: '#b3d9ff',
+        skyColorTop: [0.4, 0.6, 0.9],
+        skyColorBottom: [0.7, 0.85, 1.0],
       });
       
       frameCount++;
       const now = performance.now();
       if (now - lastTime >= 1000) {
         console.log(`[Host] Render FPS: ${frameCount}`);
+        // Verifica che il canvas abbia contenuto
+        const pixel = new Uint8Array(4);
+        const gl = renderer.gl;
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+        console.log(`[Host] Canvas pixel check (0,0):`, pixel[0], pixel[1], pixel[2], pixel[3]);
         frameCount = 0;
         lastTime = now;
       }

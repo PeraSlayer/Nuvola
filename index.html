@@ -94,7 +94,7 @@
     <div class="panel">
       <h2>Streaming</h2>
       <button id="btn-stream" class="primary full">Start Streaming</button>
-      <p class="stat mt-2" id="stream-info">Stream WebSocket 60fps a qualsiasi dispositivo</p>
+      <p class="stat mt-2" id="stream-info">Stream WebRTC 60fps a qualsiasi dispositivo</p>
     </div>
 
   </aside>
@@ -110,6 +110,7 @@
   </main>
 </div>
 
-<script type="module" src="script_js/main/main.js"></script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script type="module" src="script_js/main/main.js"></script>
 </body>
 </html>
