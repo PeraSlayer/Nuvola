@@ -34,6 +34,7 @@ export class CameraController {
     this._cachedFPSW = 0;
     this._cachedFPSH = 0;
     this._fpsUniformsDirty = true;
+    this._cloud = null;
   }
 
   get fpsSpeed() {
@@ -50,6 +51,12 @@ export class CameraController {
     this._spherical.phi -= dpitch;
     if (this._spherical.phi < MIN_POLAR) this._spherical.phi = MIN_POLAR;
     if (this._spherical.phi > MAX_POLAR) this._spherical.phi = MAX_POLAR;
+    if (this._cloud) {
+      const rotationXDeg = (this._spherical.phi - Math.PI / 2) * 180 / Math.PI;
+      const angle = -this._spherical.theta + Math.PI / 4;
+      const newTarget = this._getVisibleFaceCenter(this._cloud, angle, rotationXDeg);
+      this._target.set(newTarget[0], newTarget[1], newTarget[2]);
+    }
     this._dirty = true;
   }
 
@@ -108,6 +115,45 @@ export class CameraController {
     target.crossVectors(_v3b, _up).normalize();
   }
 
+  _getVisibleFaceCenter(cloud, angle, rotationXDeg = 0) {
+    if (!cloud || !cloud.bounds) return [0, 0, 0];
+    
+    const b = cloud.bounds;
+    const centerX = (b.min[0] + b.max[0]) / 2;
+    const centerY = (b.min[1] + b.max[1]) / 2;
+    const centerZ = (b.min[2] + b.max[2]) / 2;
+    
+    let faceY;
+    if (rotationXDeg > 45) {
+      faceY = b.max[1];
+    } else if (rotationXDeg < -45) {
+      faceY = b.min[1];
+    } else {
+      faceY = centerY;
+    }
+    
+    const normalizedAngle = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    
+    const quadrant = Math.floor(normalizedAngle / (Math.PI / 2));
+    const localAngle = normalizedAngle - quadrant * (Math.PI / 2);
+    const t = localAngle / (Math.PI / 2);
+    
+    const faceCenters = [
+      { x: centerX, z: b.max[1] },
+      { x: b.max[0], z: centerY },
+      { x: centerX, z: b.min[1] },
+      { x: b.min[0], z: centerY }
+    ];
+    
+    const idx1 = quadrant % 4;
+    const idx2 = (quadrant + 1) % 4;
+    
+    const x = faceCenters[idx1].x + (faceCenters[idx2].x - faceCenters[idx1].x) * t;
+    const z = faceCenters[idx1].z + (faceCenters[idx2].z - faceCenters[idx1].z) * t;
+    
+    return [x, faceY, z];
+  }
+
   _applyOrbit() {
     _v3.setFromSpherical(this._spherical).add(this._target);
     this.perspectiveCamera.position.copy(_v3);
@@ -142,6 +188,12 @@ export class CameraController {
   switchMode() {
     if (this.activeMode === 'isometric') {
       this.activeMode = 'fps';
+      if (this._cloud) {
+        const rotationXDeg = (this._spherical.phi - Math.PI / 2) * 180 / Math.PI;
+        const angle = -this._spherical.theta + Math.PI / 4;
+        const newTarget = this._getVisibleFaceCenter(this._cloud, angle, rotationXDeg);
+        this._target.set(newTarget[0], newTarget[1], newTarget[2]);
+      }
       this._applyOrbit();
     } else {
       this.activeMode = 'isometric';
@@ -201,11 +253,10 @@ export class CameraController {
     if (!cloud || !cloud.bounds) return;
     const min = cloud.bounds.min;
     const max = cloud.bounds.max;
-    this._target.set(
-      (min[0] + max[0]) / 2,
-      (min[1] + max[1]) / 2,
-      (min[2] + max[2]) / 2,
-    );
+    const rotationXDeg = (this._spherical.phi - Math.PI / 2) * 180 / Math.PI;
+    const angle = -this._spherical.theta + Math.PI / 4;
+    const newTarget = this._getVisibleFaceCenter(cloud, angle, rotationXDeg);
+    this._target.set(newTarget[0], newTarget[1], newTarget[2]);
     const dx = max[0] - min[0];
     const dy = max[1] - min[1];
     const dz = max[2] - min[2];
@@ -226,6 +277,18 @@ export class CameraController {
   setRefCenter(center) {
     this.isometricCamera.setRefCenter(center);
     this.setTarget(center);
+  }
+
+  setCloud(cloud) {
+    this._cloud = cloud;
+    this.isometricCamera.setCloud(cloud);
+    if (cloud) {
+      const rotationXDeg = (this._spherical.phi - Math.PI / 2) * 180 / Math.PI;
+      const angle = -this._spherical.theta + Math.PI / 4;
+      const newTarget = this._getVisibleFaceCenter(cloud, angle, rotationXDeg);
+      this._target.set(newTarget[0], newTarget[1], newTarget[2]);
+      this._dirty = true;
+    }
   }
 
   reset() {
@@ -306,4 +369,5 @@ export class CameraController {
   setView(i) { this.isometricCamera.setView(i); }
   setViewOffset(d) { this.isometricCamera.setViewOffset(d); }
   project(x, y, z) { return this.isometricCamera.project(x, y, z); }
+  setCloud(c) { this.isometricCamera.setCloud(c); this._cloud = c; }
 }

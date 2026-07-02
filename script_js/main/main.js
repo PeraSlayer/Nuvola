@@ -489,6 +489,7 @@ class App {
       }
 
       this.camera.setRefCenter(this.cloud.center);
+      this.camera.setCloud(this.cloud);
       this._fitView();
       this.camera.markDirty();
 
@@ -743,6 +744,7 @@ class App {
 
       this.renderer.uploadPointCloud(this.cloud);
       this.camera.setRefCenter(this.cloud.center);
+      this.camera.setCloud(this.cloud);
       if (this.cloud.octreeGeometry) {
         if (this.cloud.lru) {
           this.cloud.lru.setGPUBudget(this.renderer.detectedVRAM_MB);

@@ -54,6 +54,45 @@ function _spacing(cloud) {
   return 1;
 }
 
+function _getVisibleFaceCenter(cloud, angle, rotationXDeg = 0) {
+  if (!cloud || !cloud.bounds) return [0, 0, 0];
+  
+  const b = cloud.bounds;
+  const centerX = (b.min[0] + b.max[0]) / 2;
+  const centerY = (b.min[1] + b.max[1]) / 2;
+  const centerZ = (b.min[2] + b.max[2]) / 2;
+  
+  let faceY;
+  if (rotationXDeg > 45) {
+    faceY = b.max[1];
+  } else if (rotationXDeg < -45) {
+    faceY = b.min[1];
+  } else {
+    faceY = centerY;
+  }
+  
+  const normalizedAngle = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  
+  const quadrant = Math.floor(normalizedAngle / (Math.PI / 2));
+  const localAngle = normalizedAngle - quadrant * (Math.PI / 2);
+  const t = localAngle / (Math.PI / 2);
+  
+  const faceCenters = [
+    { x: centerX, z: b.max[1] },
+    { x: b.max[0], z: centerY },
+    { x: centerX, z: b.min[1] },
+    { x: b.min[0], z: centerY }
+  ];
+  
+  const idx1 = quadrant % 4;
+  const idx2 = (quadrant + 1) % 4;
+  
+  const x = faceCenters[idx1].x + (faceCenters[idx2].x - faceCenters[idx1].x) * t;
+  const z = faceCenters[idx1].z + (faceCenters[idx2].z - faceCenters[idx1].z) * t;
+  
+  return [x, faceY, z];
+}
+
 export class Camera {
   constructor() {
     this.panX = 0;
@@ -72,6 +111,7 @@ export class Camera {
     this._viewportW = 1;
     this._viewportH = 1;
     this._cloudCenter = [0, 0, 0];
+    this._cloud = null;
     this._depthMin = 0;
     this._depthMax = 1;
 
@@ -181,6 +221,9 @@ export class Camera {
     const dr = _depthRange(cloud, angle, this._depthCorners);
     this._depthMin = dr.min;
     this._depthMax = dr.max;
+    if (this._cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(this._cloud, this._rotAngle, this.rotationXDeg);
+    }
   }
 
   project(x, y, z) {
@@ -233,6 +276,9 @@ export class Camera {
     const step = this.eightDir ? Math.PI / 4 : Math.PI / 2;
     this._rotAngle = ((this._rotAngle + step) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
     this._updateViewIndex();
+    if (this._cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(this._cloud, this._rotAngle, this.rotationXDeg);
+    }
     this.markDirty();
   }
 
@@ -240,19 +286,27 @@ export class Camera {
     const step = this.eightDir ? Math.PI / 4 : Math.PI / 2;
     this._rotAngle = ((this._rotAngle - step) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
     this._updateViewIndex();
+    if (this._cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(this._cloud, this._rotAngle, this.rotationXDeg);
+    }
     this.markDirty();
   }
 
   rotateHorizontal(delta) {
     this._rotAngle = ((this._rotAngle + delta) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
     this._updateViewIndex();
+    if (this._cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(this._cloud, this._rotAngle, this.rotationXDeg);
+    }
     this.markDirty();
   }
 
   rotateVertical(delta) {
-    // Limita la rotazione verticale a +/- 89 gradi per evitare l'inversione
     const newRot = this.rotationXDeg + delta;
     this.rotationXDeg = Math.max(-89, Math.min(89, newRot));
+    if (this._cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(this._cloud, this._rotAngle, this.rotationXDeg);
+    }
     this.markDirty();
   }
 
@@ -261,6 +315,9 @@ export class Camera {
     const step = (Math.PI * 2) / n;
     this._rotAngle = ((Math.PI / 4 - index * step) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
     this.viewIndex = index;
+    if (this._cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(this._cloud, this._rotAngle, this.rotationXDeg);
+    }
     this.markDirty();
   }
 
@@ -272,6 +329,14 @@ export class Camera {
   setRefCenter(center) {
     this._refCenter = center;
     this._cloudCenter = center;
+  }
+
+  setCloud(cloud) {
+    this._cloud = cloud;
+    if (cloud) {
+      this._cloudCenter = _getVisibleFaceCenter(cloud, this._rotAngle, this.rotationXDeg);
+      this.markDirty();
+    }
   }
 
   setViewport(w, h) {
