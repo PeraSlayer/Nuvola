@@ -72,8 +72,8 @@ export function bindInput(app) {
       app.camera.markDirty();
     } else {
       // Rotazione relativa all'orientamento dell'oggetto
-      app.camera.rotateHorizontal(-dx * ROTATION_SENSITIVITY);
-      app.camera.rotateVertical(-dy * VERTICAL_ROTATION_SENSITIVITY);
+      app.camera.rotateHorizontal(dx * ROTATION_SENSITIVITY);
+      app.camera.rotateVertical(dy * VERTICAL_ROTATION_SENSITIVITY);
     }
   }, { signal });
 
@@ -225,8 +225,8 @@ export function bindInput(app) {
         const dx = (e.touches[0].clientX - app._lastMouse[0]) * dpr;
         const dy = (e.touches[0].clientY - app._lastMouse[1]) * dpr;
         app._lastMouse = [e.touches[0].clientX, e.touches[0].clientY];
-        app.camera.rotateHorizontal(-dx * ROTATION_SENSITIVITY);
-        app.camera.rotateVertical(-dy * VERTICAL_ROTATION_SENSITIVITY);
+        app.camera.rotateHorizontal(dx * ROTATION_SENSITIVITY);
+        app.camera.rotateVertical(dy * VERTICAL_ROTATION_SENSITIVITY);
       }
     } else if (e.touches.length === 2) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
