@@ -1,3 +1,18 @@
+/**
+ * @file DecoderWorker.js
+ * @description Creates an inline Web Worker from a stringified JavaScript source
+ *   that decodes binary Potree point attributes (position, color, intensity,
+ *   classification, etc.) into typed arrays. The worker is instantiated via a
+ *   Blob URL for zero-configuration usage.
+ */
+
+/**
+ * Inline source code for the decoder Web Worker.
+ * `decodeAttributes` parses raw attribute buffers; `self.onmessage` handles
+ * incoming decode requests and posts back results with transferable objects.
+ *
+ * @constant {string}
+ */
 const DECODER_WORKER_SOURCE = `
 function decodeAttributes(buffer, attributes, scale, offset) {
   const view = new DataView(buffer);
@@ -124,6 +139,12 @@ self.onmessage = function(e) {
 };
 `;
 
+/**
+ * Converts the inline worker source into a Blob URL that can be passed to
+ * `new Worker(url)`.
+ *
+ * @returns {string} A `blob:` URL string.
+ */
 export function createDecoderWorker() {
   const blob = new Blob([DECODER_WORKER_SOURCE], { type: 'application/javascript' });
   return URL.createObjectURL(blob);

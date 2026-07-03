@@ -1,3 +1,10 @@
+/**
+ * @file Nuvola Stream Server
+ * @description Express HTTP server that serves static frontend files and
+ * runs a PeerJS signaling server for WebRTC peer-to-peer streaming.
+ * Allows any device on the same network to connect and control the viewer.
+ */
+
 import express from 'express';
 import { createServer } from 'http';
 import path from 'path';
@@ -19,12 +26,23 @@ app.use(express.static(path.join(__dirname, '..')));
 // Servo anche i file dalla directory server/ direttamente
 app.use(express.static(__dirname));
 
-// Pagina principale - redirect al viewer
+/**
+ * GET /
+ * Redirects the root URL to the main viewer page.
+ * @param {import('express').Request} req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ */
 app.get('/', (req, res) => {
   res.redirect('/index.html');
 });
 
-// Pagina info server
+/**
+ * GET /info
+ * Returns an HTML page displaying server status, port information,
+ * and instructions for WebRTC streaming setup.
+ * @param {import('express').Request} req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ */
 app.get('/info', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -75,14 +93,26 @@ const peerServer = PeerServer({
   concurrent_limit: 10000
 });
 
+/**
+ * Handles a new PeerJS client connection.
+ * @param {object} client - The connected PeerJS client.
+ */
 peerServer.on('connection', (client) => {
   console.log('🔗 Peer connesso:', client.getId());
 });
 
+/**
+ * Handles a PeerJS client disconnection.
+ * @param {object} client - The disconnected PeerJS client.
+ */
 peerServer.on('disconnect', (client) => {
   console.log('🔌 Peer disconnesso:', client.getId());
 });
 
+/**
+ * Handles PeerJS server errors.
+ * @param {Error} error - The error object.
+ */
 peerServer.on('error', (error) => {
   console.error('❌ Errore PeerJS:', error);
 });

@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+
+/**
+ * @file LAS → Potree Converter CLI
+ * @description Command-line tool that converts LAS/LAZ point cloud files into
+ * the Potree octree format. Supports both in-memory and streaming modes for
+ * handling datasets of any size. Outputs metadata.json, octree.bin, and
+ * hierarchy.bin files ready to be served by a Potree-compatible viewer.
+ *
+ * Usage: node src/index.js <input.las|input.laz> <output-dir> [options]
+ */
+
 import { readLASHeader, readAllPoints, readPoints } from './las-reader.js';
 import { buildOctree } from './octree-builder.js';
 import { buildOctreeStreaming } from './octree-builder-streaming.js';
@@ -27,11 +38,16 @@ Example:
 const inputPath = resolve(args[0]);
 const outputDir = resolve(args[1]);
 
+/** @type {number} Maximum octree depth (default: 12). */
 let maxDepth = 12;
+/** @type {number} Maximum points per leaf node (default: 5000). */
 let leafSize = 5000;
+/** @type {boolean} Whether to use streaming mode for large files. */
 let streaming = false;
+/** @type {number} Memory limit in MB before switching to streaming mode. */
 let memoryLimitMB = 4096;
 
+// Parse optional CLI arguments.
 for (let i = 2; i < args.length; i++) {
   if (args[i] === '--max-depth') maxDepth = parseInt(args[++i], 10);
   if (args[i] === '--leaf-size') leafSize = parseInt(args[++i], 10);
@@ -39,6 +55,12 @@ for (let i = 2; i < args.length; i++) {
   if (args[i] === '--memory-limit') memoryLimitMB = parseInt(args[++i], 10);
 }
 
+/**
+ * Main entry point for the LAS to Potree conversion process.
+ * Reads the LAS header, determines whether streaming mode is needed,
+ * builds the octree, and writes the Potree dataset files.
+ * @returns {Promise<void>}
+ */
 async function main() {
   const name = basename(inputPath);
   console.log(`\n=== LAS → Potree Converter ===\n`);
@@ -65,6 +87,7 @@ async function main() {
     max: [header.maxX, header.maxY, header.maxZ],
   };
 
+  // Estimate memory usage (~100 bytes per point) and decide on streaming mode.
   const estimatedMemoryMB = (header.pointCount * 100) / (1024 * 1024);
   const useStreaming = streaming || estimatedMemoryMB > memoryLimitMB;
 
@@ -74,6 +97,13 @@ async function main() {
     console.log('\nBuilding octree (streaming)...');
     const t3 = performance.now();
 
+    /**
+     * Generator that yields individual points from the LAS file chunks.
+     * Reports progress every 1 million points.
+     * @async
+     * @generator
+     * @yields {Object} A single parsed point object.
+     */
     async function* pointGenerator() {
       let lastReport = 0;
       for await (const chunk of readPoints(inputPath, header)) {
@@ -108,6 +138,13 @@ async function main() {
     console.log('\nWriting Potree dataset (streaming)...');
     const t5 = performance.now();
 
+    /**
+     * Generator that yields individual points for the write phase.
+     * Reads the LAS file a second time to avoid holding all points in memory.
+     * @async
+     * @generator
+     * @yields {Object} A single parsed point object.
+     */
     async function* pointGeneratorForWrite() {
       for await (const chunk of readPoints(inputPath, header)) {
         for (const p of chunk) {

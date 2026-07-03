@@ -1,28 +1,76 @@
+/**
+ * @file NodeLoader.js
+ * @description Loads Potree octree data from the network. Handles metadata
+ *   retrieval, hierarchy parsing, node creation, and point-data decoding.
+ *   Uses a pool of Web Workers ({@link WorkerPool}) for parallel binary decoding
+ *   and issues HTTP Range requests to fetch per-node byte segments from octree.bin.
+ */
+
 import * as THREE from 'three';
 import { OctreeGeometryNode } from './PotreeOctree.js';
 import { WorkerPool } from './WorkerPool.js';
 import { createDecoderWorker } from './DecoderWorker.js';
 
+/**
+ * Fixed byte size of a hierarchy entry without a variable-length name.
+ * Layout: type(1) + childMask(1) + numPoints(4) + byteOffset(8) + byteSize(8) = 22.
+ */
 const HIERARCHY_ENTRY_FIXED_SIZE = 22;
+/**
+ * Byte size of a hierarchy entry that includes a variable-length name.
+ * Layout: type(1) + nameLen(variable) + childMask(1) + padding(1) + numPoints(4) + byteOffset(8) + byteSize(8) = 22 + nameLen.
+ */
 const HIERARCHY_ENTRY_VARIABLE_SIZE = 22;
+/**
+ * Number of Web Workers to spawn for parallel decoding.
+ * Respects `navigator.hardwareConcurrency` when available.
+ */
 const DECODER_WORKER_COUNT = typeof navigator !== 'undefined'
   ? Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1))
   : 4;
+/** Byte stride per entry in the compact binary index buffer. */
 const BIN_ENTRY_SIZE = 21;
-const MAX_CONCURRENT_FETCHES = 8; // childMask(1) + numPoints(4) + byteOffset(8) + byteSize(8)
+// childMask(1) + numPoints(4) + byteOffset(8) + byteSize(8)
+/** Maximum number of concurrent fetch requests. */
+const MAX_CONCURRENT_FETCHES = 8;
 
+/**
+ * Loads and decodes Potree binary data. Manages a pool of decoder workers,
+ * fetches hierarchy data, constructs the octree node graph, and streams
+ * per-node point data via HTTP Range requests.
+ *
+ * @class NodeLoader
+ */
 export class NodeLoader {
   constructor() {
+    /** @type {string} Blob URL for the inline decoder worker script. */
     this._decoderUrl = createDecoderWorker();
+    /** @type {WorkerPool} Pool of reusable Web Workers for decoding. */
     this._workerPool = new WorkerPool(DECODER_WORKER_COUNT);
+    /** @type {string} URL of the octree binary data file (octree.bin). */
     this._urlOctree = '';
+    /** @type {string} URL of the hierarchy binary data file (hierarchy.bin). */
     this._urlHierarchy = '';
+    /** @type {Object[]} Attribute descriptors parsed from metadata.json. */
     this._attributes = [];
+    /** @type {number} Scale factor applied during decoding. */
     this._scale = 1;
+    /** @type {number} Offset applied during decoding. */
     this._offset = 0;
+    /** @type {number} First chunk size from hierarchy metadata. */
     this._firstChunkSize = 0;
   }
 
+  /**
+   * Fetches and parses metadata.json from the given base URL.
+   * Constructs the URLs for octree.bin and hierarchy.bin and stores
+   * attribute/scale/offset metadata.
+   *
+   * @async
+   * @param {string} baseUrl Base dataset URL or full metadata.json path.
+   * @returns {Promise<Object>} Parsed metadata JSON object.
+   * @throws {Error} If the fetch fails.
+   */
   async loadMetadata(baseUrl) {
     let url = baseUrl;
     if (url.endsWith('/')) {
@@ -45,6 +93,15 @@ export class NodeLoader {
     return json;
   }
 
+  /**
+   * Fetches the full hierarchy.bin, parses all entries, builds a compact
+   * binary index in {@link OctreeGeometry}, and returns the root node.
+   *
+   * @async
+   * @param {OctreeGeometry} geometry Container to populate.
+   * @returns {Promise<OctreeGeometryNode>} The root node.
+   * @throws {Error} If hierarchy.bin cannot be fetched or no root entry is found.
+   */
   async loadHierarchyRoot(geometry) {
     const resp = await fetch(this._urlHierarchy);
     if (!resp.ok) throw new Error(`Failed to fetch hierarchy.bin: ${resp.statusText}`);
@@ -55,6 +112,13 @@ export class NodeLoader {
     return this._createNodeFromEntry('r', geometry, 0);
   }
 
+  /**
+   * Lazily loads child nodes for the given node from the hierarchy index.
+   * If children have already been created and pushed, returns them directly.
+   *
+   * @param {OctreeGeometryNode} node
+   * @returns {OctreeGeometryNode[]|null} The children array, or null if no children exist.
+   */
   loadChildren(node) {
     const geometry = node.geometry;
     if (!geometry._entryMap) return null;
@@ -76,6 +140,16 @@ export class NodeLoader {
     return node.children;
   }
 
+  /**
+   * Parses the raw hierarchy binary buffer and builds:
+   *  - `geometry._entryMap`  : name → byte-offset lookup within entry buffer
+   *  - `geometry._entryBuffer` : compact fixed-size binary index for random access
+   *  - `geometry.totalPoints` : accumulative point count
+   *
+   * @private
+   * @param {ArrayBuffer} buffer Raw hierarchy.bin data.
+   * @param {OctreeGeometry} geometry Geometry to populate with index data.
+   */
   _buildHierarchyBuffer(buffer, geometry) {
     const view = new DataView(buffer);
     const decoder = new TextDecoder('utf-8');
@@ -89,6 +163,7 @@ export class NodeLoader {
       let name, childMask, numPoints, byteOffset, byteSize;
       const typeByte = view.getUint8(offset);
 
+      // High bit set indicates a variable-length name is present.
       if (typeByte & 0x80) {
         const nameLen = typeByte & 0x3F;
         const nameBytes = new Uint8Array(buffer, offset + 1, nameLen);
@@ -113,6 +188,7 @@ export class NodeLoader {
       entries.push({ name, childMask, numPoints, byteOffset, byteSize });
     }
 
+    // Build compact binary index: each entry is BIN_ENTRY_SIZE bytes
     const binBuf = new ArrayBuffer(entries.length * BIN_ENTRY_SIZE);
     const binView = new DataView(binBuf);
     let binOff = 0;
@@ -122,6 +198,7 @@ export class NodeLoader {
       const idx = binOff;
       binView.setUint8(binOff, e.childMask);
       binView.setUint32(binOff + 1, e.numPoints, true);
+      // Split 64-bit values into two 32-bit halves for storage
       const lo = Number(e.byteOffset & 0xFFFFFFFFn);
       binView.setUint32(binOff + 5, lo, true);
       binView.setUint32(binOff + 9, Number(e.byteOffset >> 32n), true);
@@ -141,6 +218,15 @@ export class NodeLoader {
     geometry._nodeMap = new Map();
   }
 
+  /**
+   * Instantiates an {@link OctreeGeometryNode} from the compact binary index.
+   *
+   * @private
+   * @param {string} name Node name (e.g. "r", "r01").
+   * @param {OctreeGeometry} geometry Owning geometry.
+   * @param {number} entryIdx Byte-offset into `geometry._entryBuffer`.
+   * @returns {OctreeGeometryNode}
+   */
   _createNodeFromEntry(name, geometry, entryIdx) {
     const v = geometry._entryView;
     const idx = (name === 'r') ? 0 : entryIdx;
@@ -149,6 +235,7 @@ export class NodeLoader {
     const numPoints = v.getUint32(idx + 1, true);
     const loOff = v.getUint32(idx + 5, true);
     const hiOff = v.getUint32(idx + 9, true);
+    // Reconstruct BigInt from two 32-bit halves
     const byteOffset = BigInt(hiOff) << 32n | BigInt(loOff);
     const loSz = v.getUint32(idx + 13, true);
     const hiSz = v.getUint32(idx + 17, true);
@@ -169,6 +256,15 @@ export class NodeLoader {
     return node;
   }
 
+  /**
+   * Fetches and decodes the point data for a single octree node via an HTTP
+   * Range request. Delegates decoding to a Web Worker. Fires `_loadCallbacks`
+   * on success.
+   *
+   * @async
+   * @param {OctreeGeometryNode} node
+   * @returns {Promise<OctreeGeometryNode>} The same node, now with geometry data attached.
+   */
   async loadNode(node) {
     if (node.loaded || node.loading) return node;
     node._disposed = false;
@@ -208,16 +304,26 @@ export class NodeLoader {
     return node;
   }
 
+  /**
+   * Computes the axis-aligned bounding box for a given node by subdividing
+   * the root box according to its octant path encoded in the node name.
+   *
+   * @private
+   * @param {OctreeGeometryNode} node Node to set the AABB on.
+   * @param {OctreeGeometry} geometry The root geometry for initial bounds.
+   */
   _setNodeAABB(node, geometry) {
     const box = geometry.boundingBox.clone();
     const name = node.name;
 
+    // Walk the octant path character by character (after 'r')
     for (let i = 1; i < name.length; i++) {
       const childIndex = parseInt(name[i], 10);
       const mx = (box.min.x + box.max.x) * 0.5;
       const my = (box.min.y + box.max.y) * 0.5;
       const mz = (box.min.z + box.max.z) * 0.5;
 
+      // Octant bit layout: bit 2 = X, bit 1 = Y, bit 0 = Z
       box.min.x = (childIndex & 4) !== 0 ? mx : box.min.x;
       box.min.y = (childIndex & 2) !== 0 ? my : box.min.y;
       box.min.z = (childIndex & 1) !== 0 ? mz : box.min.z;
@@ -234,6 +340,14 @@ export class NodeLoader {
     node.spacing = geometry.spacing / Math.pow(2, node.depth);
   }
 
+  /**
+   * Sends a raw binary buffer to a decoder Web Worker and returns a promise
+   * that resolves with the decoded attribute arrays.
+   *
+   * @private
+   * @param {ArrayBuffer} buffer Raw point data.
+   * @returns {Promise<Object>} Decoded geometry data (position, color, intensity, etc.).
+   */
   _decodeBuffer(buffer) {
     return new Promise((resolve, reject) => {
       const worker = this._workerPool.getWorker(this._decoderUrl);
@@ -255,6 +369,7 @@ export class NodeLoader {
         reject(new Error(e.message || 'Worker error'));
       };
 
+      // Transfer the buffer to the worker (zero-copy) for performance
       const transferables = [buffer];
       worker.postMessage({
         buffer,
@@ -265,6 +380,9 @@ export class NodeLoader {
     });
   }
 
+  /**
+   * Terminates all decoder workers and releases the Blob URL.
+   */
   dispose() {
     this._workerPool.terminateAll();
     URL.revokeObjectURL(this._decoderUrl);

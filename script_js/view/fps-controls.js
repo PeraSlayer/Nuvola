@@ -1,30 +1,65 @@
+/**
+ * @file fps-controls.js
+ * @description First-person-style camera controls for the point-cloud viewer.
+ *   Provides mouse look (orbit), right-click pan, scroll-wheel dolly zoom,
+ *   touch-gesture navigation, and WASD keyboard movement through the scene.
+ *   Designed to work with a CameraController that exposes orbit, pan, dolly,
+ *   moveForward, moveRight, and moveUp methods.
+ */
+
 import * as THREE from 'three';
 
+/** Mouse look sensitivity (radians per pixel). */
 const LOOK_SENSITIVITY = 0.003;
+
+/** Factor applied to fpsSpeed for keyboard movement. */
 const MOVE_SPEED_FACTOR = 50;
+
+/** Speed multiplier when the Shift key is held. */
 const BOOST_MULTIPLIER = 3;
 
+/**
+ * First-person-style camera controls supporting mouse, touch, and keyboard
+ * input. Wraps a CameraController instance and uses an AbortController for
+ * clean event listener teardown.
+ */
 export class FPSControls {
+  /**
+   * @param {HTMLCanvasElement} canvas - The canvas receiving input events.
+   * @param {object} cameraController - Controller with orbit, pan, dolly,
+   *   moveForward, moveRight, moveUp, and fpsSpeed properties.
+   */
   constructor(canvas, cameraController) {
     this.canvas = canvas;
+    /** @type {object} Reference to the camera controller. */
     this.cc = cameraController;
+    /** @type {boolean} Whether FPS controls are active. */
     this.enabled = false;
 
     this._dragging = false;
     this._dragButton = -1;
+    /** @type {number[]} Last recorded mouse position [x, y]. */
     this._lastMouse = [0, 0];
     this._lastTouchDist = 0;
+    /** @type {Set<string>} Currently pressed keys (lowercase). */
     this._keys = new Set();
+    /** @type {AbortController|null} For removing all listeners at once. */
     this._abortController = null;
 
     this._bindEvents();
   }
 
+  /**
+   * Register all DOM event listeners using an AbortController signal so they
+   * can be removed in a single call to `dispose()`.
+   * @private
+   */
   _bindEvents() {
     this._abortController = new AbortController();
     const signal = this._abortController.signal;
     const c = this.canvas;
 
+    // Mouse-down begins a drag; records the button for subsequent differentiation.
     c.addEventListener('mousedown', (e) => {
       if (!this.enabled) return;
       this._dragging = true;
@@ -32,6 +67,7 @@ export class FPSControls {
       this._dragButton = e.button;
     }, { signal });
 
+    // Mouse-move: right button = pan, any other button = orbit look.
     window.addEventListener('mousemove', (e) => {
       if (!this.enabled || !this._dragging) return;
       if (e.which === 0) { this._dragging = false; return; }
@@ -53,12 +89,14 @@ export class FPSControls {
 
     c.addEventListener('contextmenu', (e) => e.preventDefault(), { signal });
 
+    // Scroll wheel dolly.
     c.addEventListener('wheel', (e) => {
       if (!this.enabled) return;
       e.preventDefault();
       this.cc.dolly(e.deltaY > 0 ? 0.9 : 1.1);
     }, { passive: false, signal });
 
+    // Touch: single-finger for orbit, two-finger pinch for dolly.
     c.addEventListener('touchstart', (e) => {
       if (!this.enabled) return;
       if (e.touches.length === 1) {
@@ -104,6 +142,11 @@ export class FPSControls {
     }, { signal });
   }
 
+  /**
+   * Apply keyboard movement based on currently held keys.
+   * Call once per animation frame.
+   * @param {number} dt - Delta time in seconds since the last frame.
+   */
   update(dt) {
     if (!this.enabled || this._keys.size === 0) return;
 
@@ -131,6 +174,9 @@ export class FPSControls {
     }
   }
 
+  /**
+   * Remove all event listeners by aborting the AbortSignal.
+   */
   dispose() {
     if (this._abortController) {
       this._abortController.abort();

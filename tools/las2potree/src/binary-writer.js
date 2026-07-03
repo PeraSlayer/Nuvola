@@ -1,7 +1,23 @@
+/**
+ * @file Potree Binary Writer
+ * @description Writes point cloud data in the Potree binary format.
+ * Produces three output files: octree.bin (raw point attribute data per leaf
+ * node), hierarchy.bin (octree node structure with byte offsets), and
+ * metadata.json (bounding box, spacing, attribute definitions).
+ * Supports both in-memory and streaming write modes.
+ */
+
 import { writeFileSync, mkdirSync, createWriteStream } from 'fs';
 import { join } from 'path';
 import { collectNodes, collectLeafNodes } from './octree-builder.js';
 
+/**
+ * Point attribute definitions for the Potree binary format.
+ * Each attribute has a name and byte size per point.
+ * POSITION_CARTESIAN = 3 x float32 (12 bytes), RGBA = 4 x uint8 (4 bytes),
+ * INTENSITY = uint16 (2 bytes), CLASSIFICATION = uint8 (1 byte).
+ * @constant {Array<{name: string, size: number}>}
+ */
 const ATTRIBUTES = [
   { name: 'POSITION_CARTESIAN', size: 12 },
   { name: 'RGBA', size: 4 },
@@ -9,9 +25,25 @@ const ATTRIBUTES = [
   { name: 'CLASSIFICATION', size: 1 },
 ];
 
+/** @constant {number} Total byte stride per point: 12 + 4 + 2 + 1 = 19 bytes. */
 const STRIDE = ATTRIBUTES.reduce((s, a) => s + a.size, 0);
+/** @constant {number} Maximum chunk size in bytes for file writes (256 MB). */
 const CHUNK_SIZE_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Writes a complete Potree dataset from in-memory point data.
+ * Collects all octree nodes, serializes point attributes for each leaf node
+ * into a combined octree.bin file, writes the hierarchy, and generates
+ * metadata.json.
+ *
+ * @param {Object} root - Root node of the octree (from {@link buildOctree}).
+ * @param {Object[]} points - Array of all parsed point objects.
+ * @param {{min: number[], max: number[]}} bounds - World-space bounding box.
+ * @param {string} outputDir - Directory to write output files into.
+ * @returns {{totalPoints: number, totalNodes: number, leafNodes: number, octreeSize: number, hierarchySize: number}}
+ *   Statistics about the written dataset.
+ * @throws {Error} If a buffer overflow is detected during attribute packing.
+ */
 export function writePotreeDataset(root, points, bounds, outputDir) {
   mkdirSync(outputDir, { recursive: true });
 
@@ -21,6 +53,7 @@ export function writePotreeDataset(root, points, bounds, outputDir) {
   let currentOffset = 0n;
   const octreeBuffers = [];
 
+  // Process each leaf node: pack points into attribute arrays, write binary.
   for (const leaf of leafNodes) {
     const n = leaf.pointIndices.length;
     if (n === 0) continue;
@@ -48,6 +81,7 @@ export function writePotreeDataset(root, points, bounds, outputDir) {
     const view = new Uint8Array(buf);
     let off = 0;
 
+    // Interleave attributes: POSITION, RGBA, INTENSITY, CLASSIFICATION.
     const posBytes = new Uint8Array(positions.buffer);
     if (off + posBytes.byteLength > totalBytes) {
       console.error(`Buffer overflow: off=${off}, posBytes=${posBytes.byteLength}, total=${totalBytes}, n=${n}`);
@@ -77,6 +111,7 @@ export function writePotreeDataset(root, points, bounds, outputDir) {
     }
     view.set(classifications, off);
 
+    // Track the byte offset and size of this leaf node's data in the combined file.
     leaf.byteOffset = currentOffset;
     leaf.byteSize = BigInt(buf.byteLength);
     currentOffset += leaf.byteSize;
@@ -84,6 +119,7 @@ export function writePotreeDataset(root, points, bounds, outputDir) {
     octreeBuffers.push(Buffer.from(buf));
   }
 
+  // Propagate byte offsets up the tree for parent nodes (sum of children).
   computeNodeOffsets(root);
 
   const octreeBin = Buffer.concat(octreeBuffers);
@@ -92,6 +128,7 @@ export function writePotreeDataset(root, points, bounds, outputDir) {
   const hierarchyBuf = writeHierarchy(root, allNodes);
   writeFileSync(join(outputDir, 'hierarchy.bin'), hierarchyBuf);
 
+  // Compute spacing as the diagonal of the bounding box.
   const dx = bounds.max[0] - bounds.min[0];
   const dy = bounds.max[1] - bounds.min[1];
   const dz = bounds.max[2] - bounds.min[2];
@@ -121,6 +158,22 @@ export function writePotreeDataset(root, points, bounds, outputDir) {
   };
 }
 
+/**
+ * Writes a Potree dataset in streaming mode, reading points from an async
+ * iterator and assigning them to the correct octree leaf nodes.
+ * This avoids holding all points in memory at once, suitable for very large
+ * point clouds.
+ *
+ * @async
+ * @param {Object} root - Root node of the octree.
+ * @param {AsyncIterable<Object>} pointIterator - Async iterator yielding point objects.
+ * @param {{min: number[], max: number[]}} bounds - World-space bounding box.
+ * @param {string} outputDir - Directory to write output files into.
+ * @param {function({processedPoints: number, totalBytes: number}): void} [onProgress]
+ *   Optional callback for progress reporting, called every 1M points.
+ * @returns {Promise<{totalPoints: number, totalNodes: number, leafNodes: number, octreeSize: number, hierarchySize: number}>}
+ *   Statistics about the written dataset.
+ */
 export async function writePotreeDatasetStreaming(root, pointIterator, bounds, outputDir, onProgress) {
   mkdirSync(outputDir, { recursive: true });
 
@@ -132,13 +185,16 @@ export async function writePotreeDatasetStreaming(root, pointIterator, bounds, o
   const stream = createWriteStream(join(outputDir, 'octree.bin'));
 
   let processedPoints = 0;
+  // Map leaf node names to point accumulators for streaming assignment.
   const leafMap = new Map();
   for (const leaf of leafNodes) {
     leafMap.set(leaf.name, { leaf, points: [] });
   }
 
+  // First pass: traverse the octree for each point to find its leaf node.
   for await (const point of pointIterator) {
     let node = root;
+    // Walk down the tree using child index from point position relative to bounds midpoint.
     while (node.depth < (root.maxDepth || 12) && !node.pointIndices) {
       const ci = ((point.x >= (node.bounds.min[0] + node.bounds.max[0]) * 0.5 ? 1 : 0) << 2) |
                  ((point.y >= (node.bounds.min[1] + node.bounds.max[1]) * 0.5 ? 1 : 0) << 1) |
@@ -160,6 +216,7 @@ export async function writePotreeDatasetStreaming(root, pointIterator, bounds, o
     }
   }
 
+  // Second pass: serialize accumulated points for each leaf node to disk.
   for (const [name, entry] of leafMap) {
     const { leaf, points } = entry;
     const n = points.length;
@@ -199,6 +256,7 @@ export async function writePotreeDatasetStreaming(root, pointIterator, bounds, o
     stream.write(buf);
   }
 
+  // Wait for the write stream to finish flushing.
   await new Promise((resolve, reject) => {
     stream.end((err) => {
       if (err) reject(err);
@@ -240,6 +298,13 @@ export async function writePotreeDatasetStreaming(root, pointIterator, bounds, o
   };
 }
 
+/**
+ * Recursively computes byte offsets and sizes for non-leaf octree nodes.
+ * A parent node's offset is set to its first child's offset, and its size
+ * is the sum of all children's sizes.
+ *
+ * @param {Object} node - The octree node to process (mutated in place).
+ */
 function computeNodeOffsets(node) {
   if (node.pointIndices) {
     return;
@@ -256,6 +321,16 @@ function computeNodeOffsets(node) {
   }
 }
 
+/**
+ * Serializes all octree nodes into the Potree hierarchy.bin binary format.
+ * Each node entry consists of: name length + name (up to 63 bytes), child mask
+ * (1 byte), reserved (1 byte), numPoints (uint32 LE), byteOffset (uint64 LE),
+ * byteSize (uint64 LE).
+ *
+ * @param {Object} root - Root octree node (unused, hierarchy is built from allNodes).
+ * @param {Object[]} allNodes - Flat array of all octree nodes from {@link collectNodes}.
+ * @returns {Buffer} The binary hierarchy buffer.
+ */
 function writeHierarchy(root, allNodes) {
   const encoder = new TextEncoder();
   const chunks = [];
@@ -264,11 +339,13 @@ function writeHierarchy(root, allNodes) {
     const nameBytes = encoder.encode(node.name);
     const nameLen = nameBytes.length;
 
+    // Node names must fit in 63 bytes for Potree compatibility.
     if (nameLen <= 63) {
       const entrySize = 1 + nameLen + 22;
       const buf = Buffer.alloc(entrySize);
       let off = 0;
 
+      // First byte: 0x80 flag + name length (6 bits).
       buf[off] = 0x80 | (nameLen & 0x3F);
       off += 1;
 
@@ -278,6 +355,7 @@ function writeHierarchy(root, allNodes) {
       buf[off] = node.childMask;
       off += 1;
 
+      // Reserved byte (unused).
       buf[off] = 0;
       off += 1;
 

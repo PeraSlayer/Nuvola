@@ -1,3 +1,14 @@
+/**
+ * LAZ decompressor using laz-perf WebAssembly.
+ *
+ * Provides a single async function {@link decompressLAZ} that takes a
+ * compressed LAZ ArrayBuffer and returns an uncompressed LAS ArrayBuffer
+ * ready for parsing by the LAS loader. The laz-perf WASM module is loaded
+ * lazily on first use from the tools/laz-perf/ directory.
+ *
+ * @module laz-decompressor
+ */
+
 /*
 ===============================================================================
 File: laz-decompressor.js
@@ -19,6 +30,19 @@ const LAZ_PERF_WASM_DIR = _projectRoot + 'tools/laz-perf/';
 let _lazPerfModule = null;
 let _loading = null;
 
+/**
+ * Loads the laz-perf WebAssembly module on demand. The module is loaded
+ * only once; subsequent calls return the cached instance. If a load is
+ * already in progress, the existing Promise is reused.
+ *
+ * The laz-perf.js script is injected into the document head, which
+ * provides the global `createLazPerf` factory function used to
+ * instantiate the WASM module.
+ *
+ * @returns {Promise<object>} The initialized laz-perf module containing
+ *   the LASZip class and WASM memory utilities.
+ * @private
+ */
 async function _loadLazPerf() {
   if (_lazPerfModule) return _lazPerfModule;
   if (_loading) return _loading;
@@ -57,10 +81,18 @@ async function _loadLazPerf() {
 }
 
 /**
- * Decomprime un buffer LAZ in un buffer LAS.
- * 
- * @param {ArrayBuffer} lazBuffer - Buffer LAZ compresso
- * @returns {Promise<ArrayBuffer>} Buffer LAS decompresso
+ * Decompresses a LAZ (compressed LAS) buffer into an uncompressed LAS
+ * buffer suitable for parsing by the LAS loader.
+ *
+ * Validates the LASF signature, allocates WASM memory for the input
+ * buffer, opens a LASZip decoder, decompresses points one by one, and
+ * reconstructs the full LAS buffer by prepending the original header
+ * and VLR (Variable Length Record) data.
+ *
+ * @param {ArrayBuffer} lazBuffer - The compressed LAZ buffer.
+ * @returns {Promise<ArrayBuffer>} The uncompressed LAS buffer, ready
+ *   for point cloud parsing.
+ * @export
  */
 export async function decompressLAZ(lazBuffer) {
   const module = await _loadLazPerf();

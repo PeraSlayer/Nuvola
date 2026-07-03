@@ -1,3 +1,19 @@
+/**
+ * LAS point cloud loader with Web Worker-based parsing and chunked reading.
+ *
+ * Parses uncompressed LAS files (versions 1.2-1.4) entirely in JavaScript.
+ * Supports both full in-memory parsing for small files and chunked reading
+ * (~256MB blocks) for files larger than 2GB to avoid memory pressure. A
+ * dedicated Web Worker extracts header metadata, scale/offset, coordinates,
+ * intensity, and optional RGB color data, delivering typed arrays ready for
+ * PointCloud rendering.
+ *
+ * For LAZ (compressed LAS) files, decompress first with laz-decompressor.js
+ * and then pass the resulting LAS buffer to this loader.
+ *
+ * @module las-loader
+ */
+
 /*
 ===============================================================================
 File: las-loader.js
@@ -29,6 +45,16 @@ laz-decompressor.js e poi passare il buffer LAS risultante a questo loader.
 const LAS_WORKER_SOURCE = `
 'use strict';
 
+/**
+ * Parses the LAS file header and extracts structural metadata.
+ *
+ * Validates the "LASF" signature, reads version, point format, record
+ * length, scale/offset factors, and determines whether color (RGB) data
+ * is embedded. For LAS 1.4, reads the 64-bit point count at offset 247.
+ *
+ * @param {DataView} dv - DataView over the header bytes (at least 375 bytes).
+ * @returns {{pointOffset: number, pointCount: number, pointFormat: number, pointRecordLength: number, scaleX: number, scaleY: number, scaleZ: number, offsetX: number, offsetY: number, offsetZ: number, hasColor: boolean, rgbOffset: number}} Parsed header information.
+ */
 function parseHeader(dv) {
   const fileSignature = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
   console.log('[LAS Worker] parseHeader called, buffer size:', dv.byteLength);
@@ -71,6 +97,7 @@ function parseHeader(dv) {
   
   const hasColor = (pointFormat === 2 || pointFormat === 3 || pointFormat === 7 || pointFormat === 8);
   
+  // Determine byte offset of RGB fields within each point record
   let rgbOffset = -1;
   if (pointFormat === 2) rgbOffset = 20;
   else if (pointFormat === 3) rgbOffset = 28;
@@ -84,6 +111,18 @@ function parseHeader(dv) {
   };
 }
 
+/**
+ * Parses a raw chunk of LAS point data without validating the header.
+ *
+ * Iterates over point records applying scale/offset transforms to produce
+ * world-space coordinates. Tracks per-chunk intensity min/max for later
+ * global normalization.
+ *
+ * @param {ArrayBuffer} buffer - Raw point data chunk.
+ * @param {object} header - Parsed header object from parseHeader().
+ * @param {number} numPoints - Number of point records expected in this chunk.
+ * @returns {{positions: Float32Array, colors: Uint8Array, intensity: Float32Array, minI: number, maxI: number, numPoints: number}} Parsed point data for this chunk.
+ */
 function parseRawChunk(buffer, header, numPoints) {
   // Parse raw point data chunk (no header validation)
   const dv = new DataView(buffer);
@@ -113,6 +152,7 @@ function parseRawChunk(buffer, header, numPoints) {
     if (iVal < minI) minI = iVal;
     if (iVal > maxI) maxI = iVal;
     
+    // Parse RGB if the point format supports it; LAS stores 16-bit channels
     if (hasColor && rgbOffset !== -1 && pointStart + rgbOffset + 6 <= buffer.byteLength) {
       let r = dv.getUint16(pointStart + rgbOffset, true);
       let g = dv.getUint16(pointStart + rgbOffset + 2, true);
@@ -135,6 +175,16 @@ function parseRawChunk(buffer, header, numPoints) {
   };
 }
 
+/**
+ * Parses an entire LAS buffer in one pass (for small files that fit in memory).
+ *
+ * Reads the header, iterates over all point records, normalizes intensity
+ * to 0..1, and fills missing colors with grayscale based on normalized
+ * intensity.
+ *
+ * @param {ArrayBuffer} buffer - Complete LAS file buffer.
+ * @returns {{positions: Float32Array, colors: Uint8Array, intensity: Float32Array, count: number, hasColor: boolean, hasIntensity: boolean}} Parsed point data.
+ */
 function parseFull(buffer) {
   const dv = new DataView(buffer);
   const header = parseHeader(dv);
@@ -176,12 +226,14 @@ function parseFull(buffer) {
     }
   }
   
+  // Normalize intensity to 0..1 range
   const iRange = maxI - minI;
   for (let i = 0; i < pointCount; i++) {
     if (iRange > 0) intensity[i] = (intensity[i] - minI) / iRange;
     else intensity[i] = 0.5;
   }
   
+  // If no RGB data, derive grayscale colors from normalized intensity
   if (!hasColor) {
     for (let i = 0; i < pointCount; i++) {
       const val = Math.floor(intensity[i] * 255);
@@ -194,6 +246,18 @@ function parseFull(buffer) {
   return { positions, colors, intensity, count: pointCount, hasColor, hasIntensity: true };
 }
 
+/**
+ * Web Worker message handler for LAS parsing.
+ *
+ * Supports three message types:
+ * - 'parseHeader': returns header metadata only.
+ * - 'parseRawChunk': parses a subset of point records and returns them.
+ * - 'parseFull': parses the entire buffer at once.
+ *
+ * Results are posted back with transferable buffers for zero-copy.
+ *
+ * @listens MessageEvent
+ */
 self.onmessage = function(e) {
   try {
     const msg = e.data;
@@ -221,11 +285,17 @@ self.onmessage = function(e) {
 
 /** Loads LAS / LAZ point clouds via a Web Worker. */
 export class LASLoader {
+  /**
+   * Creates a Blob URL for the inline LAS worker source.
+   */
   constructor() {
     const blob = new Blob([LAS_WORKER_SOURCE], { type: 'application/javascript' });
     this._workerUrl = URL.createObjectURL(blob);
   }
 
+  /**
+   * Revokes the worker Blob URL and cleans up resources.
+   */
   dispose() {
     if (this._workerUrl) {
       URL.revokeObjectURL(this._workerUrl);
@@ -233,17 +303,41 @@ export class LASLoader {
     }
   }
   
+  /**
+   * Checks whether a file has a .las or .laz extension.
+   *
+   * @param {File} file - The file to check.
+   * @returns {boolean} True if the file is a LAS or LAZ file.
+   */
   static isLASFile(file) {
     const n = file.name.toLowerCase();
     return n.endsWith('.las') || n.endsWith('.laz');
   }
   
+  /**
+   * Reads a LAS file for processing. For standard LAS, returns the File
+   * object so chunked reading can be used. LAZ files are handled at a
+   * higher level via decompression before reaching this method.
+   *
+   * @param {File} file - The DOM File object.
+   * @returns {Promise<{file: File, type: string}>} File reference for further processing.
+   */
   static async readFile(file) {
     // For LAS files, return the File object for chunked reading
     // For LAZ files, this will be overridden in main.js
     return { file, type: 'las-file' };
   }
   
+  /**
+   * Sends a message to the worker and returns a Promise that resolves with
+   * the response. Handles worker errors by terminating the worker.
+   *
+   * @param {Worker} worker - The Web Worker instance.
+   * @param {object} msg - The message to send.
+   * @param {ArrayBuffer[]} [transferables=[]] - Transferable objects for zero-copy.
+   * @returns {Promise<object>} The worker's response message.
+   * @private
+   */
   _sendToWorker(worker, msg, transferables = []) {
     return new Promise((resolve, reject) => {
       worker.onmessage = (e) => {
@@ -255,6 +349,18 @@ export class LASLoader {
     });
   }
   
+  /**
+   * Loads and parses a LAS file or buffer. Chooses chunked reading for
+   * large files ({file, type} objects) or full parsing for in-memory
+   * ArrayBuffers.
+   *
+   * @param {File|ArrayBuffer|object} fileRef - Either a raw ArrayBuffer or a
+   *   file reference object {file, type: 'las-file'}.
+   * @param {boolean} [isCompressed=false] - Whether the source is compressed
+   *   (deprecated; LAZ decompression now happens externally).
+   * @returns {Promise<object>} Parsed point cloud data with positions,
+   *   colors, intensity, and metadata.
+   */
   async load(fileRef, isCompressed = false) {
     // isCompressed è sempre false ora perché la decompressione LAZ
     // avviene in _readLASFile() prima di arrivare qui
@@ -272,6 +378,13 @@ export class LASLoader {
     throw new Error('Invalid input: expected ArrayBuffer or {file, type} object');
   }
   
+  /**
+   * Parses an entire in-memory ArrayBuffer in a single pass via the worker.
+   *
+   * @param {ArrayBuffer} arrayBuffer - The complete LAS file buffer.
+   * @returns {Promise<object>} Parsed point data from the 'parseFull' message.
+   * @private
+   */
   async _loadLegacy(arrayBuffer) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(this._workerUrl);
@@ -286,6 +399,17 @@ export class LASLoader {
     });
   }
   
+  /**
+   * Loads a large LAS file using chunked reading (~256MB blocks) to avoid
+   * loading the entire file into memory. Reads the header first, then
+   * processes point data in sequential chunks, normalizes intensity
+   * globally, and fills missing colors with grayscale.
+   *
+   * @param {File} file - The DOM File object to load.
+   * @returns {Promise<object>} Parsed point cloud data with positions,
+   *   colors, intensity, count, and metadata.
+   * @private
+   */
   async _loadChunked(file) {
     const worker = new Worker(this._workerUrl);
     
@@ -360,11 +484,11 @@ export class LASLoader {
         
         actualPoints += chunkMsg.numPoints;
         
-        // Yield to UI every chunk
+        // Yield to UI every chunk to keep the browser responsive
         await new Promise(r => setTimeout(r, 0));
       }
       
-      // 4. Normalize intensity
+      // 4. Normalize intensity globally to 0..1 range
       const iRange = globalMaxI - globalMinI;
       for (let i = 0; i < actualPoints; i++) {
         if (iRange > 0) intensity[i] = (intensity[i] - globalMinI) / iRange;

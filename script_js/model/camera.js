@@ -1,17 +1,24 @@
-/*
-===============================================================================
-File: camera.js
+/**
+ * @file camera.js
+ * @description Defines the isometric Camera class for Nuvola's 2.5D point cloud
+ *              viewer. Manages pan, zoom, rotation (cardinal snapping + Euler tilt),
+ *              fit-to-bounds, world-to-screen projection, and depth-range computation.
+ *
+ *              All math matches the isometric path in the WebGL2 vertex shader
+ *              (shader.js). Exports the Camera class used by renderer, main, minimap,
+ *              measurements, and gizmo.
+ */
 
-Defines the isometric Camera class for Nuvola's 2.5D point cloud viewer.
-Manages pan, zoom, rotation (cardinal snapping + Euler tilt), fit-to-bounds,
-world-to-screen projection, and depth range computation.
-
-All math matches the isometric path in the WebGL2 vertex shader (shader.js).
-
-Exporta la classe Camera usata da renderer, main, minimap, misure e gizmo.
-===============================================================================
-*/
-
+/**
+ * Computes the normalized depth range [min, max] of the point cloud's bounding-box
+ * corners transformed into the isometric camera's view-space. The result is used
+ * by the shader for depth-based effects (e.g. fog, slicing).
+ *
+ * @param {import('./PointCloud.js').PointCloud} cloud
+ * @param {number} angle - Horizontal rotation angle (rotAngle) in radians.
+ * @param {number[][]} corners - Pre-allocated 8×3 scratch array (reused to avoid GC pressure).
+ * @returns {{min: number, max: number}}
+ */
 function _depthRange(cloud, angle, corners) {
   if (!cloud || !cloud.bounds) return { min: 0, max: 1 };
   const b = cloud.bounds;
@@ -40,6 +47,14 @@ function _depthRange(cloud, angle, corners) {
   return { min: minD, max: minD === maxD ? maxD + 1 : maxD };
 }
 
+/**
+ * Estimates the average inter-point spacing of a point cloud, used for
+ * point-size scaling and LOD tuning. Prefers the Potree spacing field
+ * when available; otherwise approximates via cube-root of per-point volume.
+ *
+ * @param {import('./PointCloud.js').PointCloud} cloud
+ * @returns {number}
+ */
 function _spacing(cloud) {
   if (!cloud) return 1;
   if (cloud.octreeGeometry && cloud.octreeGeometry.spacing > 0)
@@ -54,6 +69,17 @@ function _spacing(cloud) {
   return 1;
 }
 
+/**
+ * Determines the 3D world-space center of the face that is most visible
+ * from the current camera angle and rotation. Used to compute a dynamic
+ * {@link Camera#_cloudCenter} that keeps the visible portion of the cloud
+ * centered on screen during rotation.
+ *
+ * @param {import('./PointCloud.js').PointCloud} cloud
+ * @param {number} angle - Horizontal rotation angle in radians.
+ * @param {number} [rotationXDeg=0] - Vertical tilt in degrees.
+ * @returns {number[]} [x, y, z] world-space coordinates.
+ */
 function _getVisibleFaceCenter(cloud, angle, rotationXDeg = 0) {
   if (!cloud || !cloud.bounds) return [0, 0, 0];
   
@@ -73,6 +99,8 @@ function _getVisibleFaceCenter(cloud, angle, rotationXDeg = 0) {
   
   const normalizedAngle = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
   
+  // Determine which quadrant the angle falls into and interpolate between
+  // the four cardinal face centers to produce a smooth transition.
   const quadrant = Math.floor(normalizedAngle / (Math.PI / 2));
   const localAngle = normalizedAngle - quadrant * (Math.PI / 2);
   const t = localAngle / (Math.PI / 2);
@@ -115,6 +143,7 @@ export class Camera {
     this._depthMin = 0;
     this._depthMax = 1;
 
+    /** Pre-allocated scratch array for 8 bounding-box corners in depth-range computation. */
     this._depthCorners = [
       [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
       [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
@@ -130,14 +159,32 @@ export class Camera {
     this._uniformsDirty = true;
   }
 
+  /**
+   * Converts the current view-offset from degrees to radians.
+   * @returns {number}
+   */
   get viewOffsetRad() {
     return this.viewOffsetDeg * Math.PI / 180;
   }
 
+  /** @returns {number} Current horizontal rotation angle in radians. */
   get rotAngle() { return this._rotAngle; }
+
+  /** @returns {number} The zoom level computed during the last fit-to-bounds. */
   get defaultZoom() { return this._defaultZoom; }
+
+  /** @returns {number[]} The reference center point [x, y, z]. */
   get refCenter() { return this._refCenter; }
 
+  /**
+   * Builds (or returns a cached) uniform-object containing all shader
+   * uniforms for the current camera state.
+   *
+   * @param {number} w - Viewport width.
+   * @param {number} h - Viewport height.
+   * @param {import('./PointCloud.js').PointCloud} cloud
+   * @returns {Object} Shader uniform dictionary.
+   */
   getUniforms(w, h, cloud) {
     if (!this._uniformsDirty && this._cachedUniforms && this._cachedW === w && this._cachedH === h) {
       return this._cachedUniforms;
@@ -177,6 +224,16 @@ export class Camera {
     return this._cachedUniforms;
   }
 
+  /**
+   * Computes zoom and pan so the entire point cloud is visible within the
+   * viewport. Updates {@link _defaultZoom}, {@link zoom}, {@link panX},
+   * {@link panY}, and the depth range.
+   *
+   * @param {import('./PointCloud.js').PointCloud} cloud
+   * @param {number} w - Viewport width.
+   * @param {number} h - Viewport height.
+   * @param {number} [angle] - Horizontal rotation angle (defaults to current rotAngle).
+   */
   fitToBounds(cloud, w, h, angle) {
     if (angle === undefined) angle = this._rotAngle;
     if (!cloud || !cloud.bounds) return;
@@ -226,6 +283,15 @@ export class Camera {
     }
   }
 
+  /**
+   * Projects a 3D world-space point into 2D screen-space coordinates using
+   * the current camera transform (isometric projection + pan/zoom).
+   *
+   * @param {number} x - World-space X.
+   * @param {number} y - World-space Y.
+   * @param {number} z - World-space Z.
+   * @returns {[number, number]} Screen-space [sx, sy] in pixels.
+   */
   project(x, y, z) {
     const cx = this._cloudCenter[0], cy = this._cloudCenter[1], cz = this._cloudCenter[2];
     let lx = x - cx, ly = y - cy, lz = z - cz;
@@ -248,6 +314,14 @@ export class Camera {
     ];
   }
 
+  /**
+   * Static helper to compute the depth range of a point cloud for a given
+   * rotation angle, without requiring a Camera instance.
+   *
+   * @param {import('./PointCloud.js').PointCloud} cloud
+   * @param {number} angle - Horizontal rotation in radians.
+   * @returns {{min: number, max: number}}
+   */
   static depthRange(cloud, angle) {
     const corners = [
       [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
@@ -256,6 +330,16 @@ export class Camera {
     return _depthRange(cloud, angle, corners);
   }
 
+  /**
+   * Zooms the camera by a multiplicative factor, keeping the point at screen
+   * coordinates (sx, sy) fixed under the cursor.
+   *
+   * @param {number} factor - Multiplicative zoom factor (>1 zooms in).
+   * @param {number} sx - Screen-space X anchor.
+   * @param {number} sy - Screen-space Y anchor.
+   * @param {number} w - Viewport width (unused, kept for consistency).
+   * @param {number} h - Viewport height (unused, kept for consistency).
+   */
   zoomAt(factor, sx, sy, w, h) {
     const prev = this.zoom;
     const next = this.zoom * factor;
@@ -265,6 +349,10 @@ export class Camera {
     this.markDirty();
   }
 
+  /**
+   * Recalculates {@link viewIndex} by snapping the current rotation angle
+   * to the nearest cardinal / semi-cardinal direction.
+   */
   _updateViewIndex() {
     const n = this.eightDir ? 8 : 4;
     const step = (Math.PI * 2) / n;
@@ -272,6 +360,10 @@ export class Camera {
     this.viewIndex = ((idx % n) + n) % n;
   }
 
+  /**
+   * Rotates the camera left (counter-clockwise in world space) by one
+   * cardinal (90°) or semi-cardinal (45°) step.
+   */
   rotateLeft() {
     const step = this.eightDir ? Math.PI / 4 : Math.PI / 2;
     this._rotAngle = ((this._rotAngle + step) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
@@ -282,6 +374,10 @@ export class Camera {
     this.markDirty();
   }
 
+  /**
+   * Rotates the camera right (clockwise in world space) by one cardinal
+   * (90°) or semi-cardinal (45°) step.
+   */
   rotateRight() {
     const step = this.eightDir ? Math.PI / 4 : Math.PI / 2;
     this._rotAngle = ((this._rotAngle - step) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
@@ -292,6 +388,10 @@ export class Camera {
     this.markDirty();
   }
 
+  /**
+   * Rotates the camera horizontally by an arbitrary angle delta in radians.
+   * @param {number} delta - Rotation delta in radians.
+   */
   rotateHorizontal(delta) {
     this._rotAngle = ((this._rotAngle + delta) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
     this._updateViewIndex();
@@ -301,6 +401,11 @@ export class Camera {
     this.markDirty();
   }
 
+  /**
+   * Rotates the camera vertically (Euler X tilt), clamped to ±89° to avoid
+   * gimbal-lock artifacts.
+   * @param {number} delta - Vertical rotation delta in degrees.
+   */
   rotateVertical(delta) {
     const newRot = this.rotationXDeg + delta;
     this.rotationXDeg = Math.max(-89, Math.min(89, newRot));
@@ -310,6 +415,10 @@ export class Camera {
     this.markDirty();
   }
 
+  /**
+   * Snaps the camera to a discrete cardinal view index.
+   * @param {number} index - 0-based view index (0–3 for 4-dir, 0–7 for 8-dir).
+   */
   setView(index) {
     const n = this.eightDir ? 8 : 4;
     const step = (Math.PI * 2) / n;
@@ -321,16 +430,30 @@ export class Camera {
     this.markDirty();
   }
 
+  /**
+   * Sets a persistent view-offset angle in degrees (shifts the isometric
+   * projection baseline).
+   * @param {number} deg
+   */
   setViewOffset(deg) {
     this.viewOffsetDeg = deg;
     this.markDirty();
   }
 
+  /**
+   * Explicitly sets the reference center of the camera.
+   * @param {number[]} center - [x, y, z] world-space point.
+   */
   setRefCenter(center) {
     this._refCenter = center;
     this._cloudCenter = center;
   }
 
+  /**
+   * Associates a point cloud with the camera, enabling cloud-aware
+   * center-of-vision and depth-range computation.
+   * @param {import('./PointCloud.js').PointCloud} cloud
+   */
   setCloud(cloud) {
     this._cloud = cloud;
     if (cloud) {
@@ -339,22 +462,40 @@ export class Camera {
     }
   }
 
+  /**
+   * Updates the cached viewport dimensions.
+   * @param {number} w
+   * @param {number} h
+   */
   setViewport(w, h) {
     this._viewportW = w;
     this._viewportH = h;
   }
 
+  /**
+   * Marks the camera state and uniform cache as dirty so they will be
+   * recomputed on the next access.
+   */
   markDirty() {
     this._dirty = true;
     this._uniformsDirty = true;
   }
 
+  /**
+   * Returns whether the camera has been modified since the last
+   * consumeDirty() call and resets the flag.
+   * @returns {boolean}
+   */
   consumeDirty() {
     const d = this._dirty;
     this._dirty = false;
     return d;
   }
 
+  /**
+   * Resets the camera to its default state: zero rotation, default zoom,
+   * and centered pan.
+   */
   reset() {
     this.rotationXDeg = 0;
     this.rotationYDeg = 0;

@@ -2,7 +2,7 @@
 ===============================================================================
 File: main.js
 
-Questo e il punto di ingresso dell'applicazione Nuvola. Importa camera,
+Questo è il punto di ingresso dell'applicazione Nuvola. Importa camera,
 renderer, loader dei formati supportati, modello della nuvola di punti,
 strumenti di misura, minimappa e controller dell'interfaccia; poi li collega
 in una singola classe App.
@@ -14,8 +14,11 @@ aggiornamento dei pannelli UI e render loop. Contiene anche un worker inline
 che prepara dati pesanti come bounds, centro, livelli LOD, tile e griglia di
 picking senza bloccare il thread principale del browser.
 
-In pratica coordina tutto cio che succede tra input utente, dati caricati e
+In pratica coordina tutto ciò che succede tra input utente, dati caricati e
 visualizzazione WebGL.
+
+@file main.js
+@module Nuvola
 ===============================================================================
 */
 
@@ -84,7 +87,29 @@ async function _readLASFile(file, format) {
   }
 }
 
+/**
+ * Inline Web Worker source code for building octrees, computing bounds,
+ * creating pick grids, and performing LOD data preparation off the main thread.
+ *
+ * Functions defined inside this string:
+ * - _octBuild: recursively subdivides points into octree nodes
+ * - buildOctree: entry point for octree construction
+ * - collectLeafBufs: gathers ArrayBuffer references from leaf nodes for transfer
+ * - self.onmessage: worker message handler orchestrating the full pipeline
+ * @constant {string} APP_OCTREE_WORKER
+ */
 const APP_OCTREE_WORKER = `
+/**
+ * Recursively build an octree node by subdividing point indices
+ * into 8 child cells based on the mid-point of the bounding box.
+ * @param {Float32Array} positions - flat xyz coordinate array
+ * @param {Uint32Array} indices - point indices assigned to this node
+ * @param {Array<number>} bounds - [minX, minY, minZ, maxX, maxY, maxZ]
+ * @param {number} depth - current recursion depth
+ * @param {number} maxDepth - maximum allowed depth
+ * @param {number} leafSize - maximum points per leaf node
+ * @returns {Object} octree node with min, max, depth, count, indices, children
+ */
 function _octBuild(positions, indices, bounds, depth, maxDepth, leafSize) {
   var count = indices.length;
   var node = { min:[bounds[0],bounds[1],bounds[2]], max:[bounds[3],bounds[4],bounds[5]], depth:depth, count:count, indices:null, children:null };
@@ -106,17 +131,44 @@ function _octBuild(positions, indices, bounds, depth, maxDepth, leafSize) {
   return node;
 }
 
+/**
+ * Build a complete octree from position data.
+ * @param {Float32Array} positions - flat xyz coordinate array
+ * @param {number} count - total number of points
+ * @param {Object} bounds - bounding box { min:[x,y,z], max:[x,y,z] }
+ * @param {number} [maxDepth=12] - maximum octree depth
+ * @param {number} [leafSize=2000] - maximum points per leaf node
+ * @returns {Object} root octree node
+ */
 function buildOctree(positions, count, bounds, maxDepth, leafSize) {
   var all = new Uint32Array(count);
   for (var j = 0; j < count; j++) all[j] = j;
   return _octBuild(positions, all, [bounds.min[0],bounds.min[1],bounds.min[2],bounds.max[0],bounds.max[1],bounds.max[2]], 0, maxDepth||12, leafSize||2000);
 }
 
+/**
+ * Collect ArrayBuffer references from all leaf nodes of an octree
+ * for zero-copy transfer back to the main thread.
+ * @param {Object} node - octree node
+ * @param {Array<ArrayBuffer>} arr - accumulator array for buffers
+ */
 function collectLeafBufs(node, arr) {
   if (node.indices) { arr.push(node.indices.buffer); return; }
   if (node.children) { for (var k = 0; k < node.children.length; k++) collectLeafBufs(node.children[k], arr); }
 }
 
+/**
+ * Worker message handler. Receives raw position/color/intensity data,
+ * computes bounding box, center, intensity range, builds an octree
+ * and a 2D pick grid, then posts the processed results back
+ * with transferable buffers for zero-copy.
+ * @param {MessageEvent} e
+ * @param {Object} e.data
+ * @param {Float32Array} e.data.positions
+ * @param {Uint8Array} e.data.colors
+ * @param {Float32Array} [e.data.intensity]
+ * @param {number} e.data.count
+ */
 self.onmessage = function(e) {
   try {
     var d = e.data;
@@ -136,6 +188,8 @@ self.onmessage = function(e) {
     var iMin = i ? iM : 0, iMax = i ? (iX===iM?iX+1:iX) : 1;
     var octree = buildOctree(p, n, b, 12, 2000);
 
+    // Build a 2D pick grid: subdivide the XY plane into a 128x128 grid,
+    // compute per-cell point counts and flat offsets for fast spatial queries
     var pc2 = 128, pgc = pc2*pc2;
     var sx = b.max[0]-b.min[0]||1, sy = b.max[1]-b.min[1]||1;
     var pgCounts = new Uint32Array(pgc);
@@ -145,6 +199,7 @@ self.onmessage = function(e) {
     var pgFlat = new Uint32Array(n);
     var pgCursor = new Uint32Array(pgc);
     for (var j = 0; j < n; j++) { var gx = Math.min(pc2-1,Math.floor(((p[j*3]-b.min[0])/sx)*pc2)); var gy = Math.min(pc2-1,Math.floor(((p[j*3+1]-b.min[1])/sy)*pc2)); var _cell = gy*pc2+gx; pgFlat[pgOffsets[_cell] + pgCursor[_cell]++] = j; }
+    // Collect all transferable buffers for zero-copy postMessage
     var tr = [p.buffer, c.buffer]; if (i) tr.push(i.buffer);
     collectLeafBufs(octree, tr);
     tr.push(pgFlat.buffer, pgOffsets.buffer, pgCounts.buffer);
@@ -157,6 +212,13 @@ self.onmessage = function(e) {
 
 /** Main application orchestrating camera, renderer, loaders, UI, and the render loop. */
 class App {
+
+  /**
+   * Initializes the Nuvola point cloud viewer application.
+   * Sets up canvas overlays, loaders for all supported formats,
+   * renderer, camera, measurement tools, minimap, UI controller,
+   * gizmo for cloud transforms, VR mode, and starts the render loop.
+   */
   constructor() {
     this.canvas = document.getElementById('glcanvas');
 
@@ -237,6 +299,11 @@ class App {
     requestAnimationFrame((t) => this._loop(t));
   }
 
+  /**
+   * Computes the light direction vector from azimuth, elevation, and ambient settings.
+   * Azimuth is in degrees (0 = +Y, 90 = +X), elevation in degrees from horizontal.
+   * @returns {number[]} Normalized 3D light direction vector [x, y, z]
+   */
   getLightDir() {
     const az = this.lightAz * Math.PI / 180;
     const el = this.lightEl * Math.PI / 180;
@@ -250,6 +317,7 @@ class App {
   /**
    * View direction (from scene toward camera) for SH evaluation.
    * Derived from the isometric camera's rotation — not the FPS camera.
+   * @returns {number[]} Normalized 3D view direction vector [x, y, z]
    */
   _getViewDir() {
     const angle = this.camera.rotAngle;
@@ -262,10 +330,18 @@ class App {
     return [cx / len, cy / len, cz / len];
   }
 
+  /**
+   * Gets the current point budget for level-of-detail selection.
+   * @returns {number}
+   */
   get pointBudget() {
     return this._pointBudget;
   }
 
+  /**
+   * Sets the point budget and propagates it to the loaded point cloud.
+   * @param {number} val
+   */
   set pointBudget(val) {
     this._pointBudget = val;
     if (this.cloud) {
@@ -273,6 +349,10 @@ class App {
     }
   }
 
+  /**
+   * Returns the current decimation configuration for LOD selection.
+   * @returns {{enableRangeDecimation: boolean, minPointsForDetail: number, maxDistanceRatio: number}}
+   */
   getDecimationOptions() {
     return {
       enableRangeDecimation: this.enableRangeDecimation,
@@ -281,6 +361,10 @@ class App {
     };
   }
 
+  /**
+   * Fits the camera to the bounding box of the currently loaded point cloud.
+   * Updates zoom slider and point budget UI after fitting.
+   */
   _fitView() {
     const target = this.cloud;
     if (!target) return;
@@ -296,6 +380,11 @@ class App {
     this.camera.markDirty();
   }
 
+  /**
+   * Draws a 3-axis orientation gizmo (X=red, Y=green, Z=blue) in the bottom-right
+   * corner of the overlay canvas, showing the current camera orientation.
+   * @param {CanvasRenderingContext2D} ctx - 2D overlay context
+   */
   _drawGizmo(ctx) {
     if (!this.cloud) return;
     const w = this.overlayCanvas.width, h = this.overlayCanvas.height;
@@ -352,6 +441,11 @@ class App {
     ctx.restore();
   }
 
+  /**
+   * Snaps the camera to a cardinal view: 'top', 'front', 'right', or 'back'.
+   * After snapping, fits the view to the cloud bounds and updates UI buttons.
+   * @param {string} view - One of 'top', 'front', 'right', 'back'
+   */
   snapToView(view) {
     const cam = this.camera;
     switch (view) {
@@ -378,6 +472,11 @@ class App {
     this._updateViewButtons();
   }
 
+  /**
+   * Handles window resize events. Scales canvases and renderer to match
+   * the container dimensions while maintaining a fixed rendering resolution
+   * for streaming purposes. Re-fits the camera view if a cloud is loaded.
+   */
   _resize() {
     const main = document.getElementById('main');
     const containerW = main.clientWidth, containerH = main.clientHeight;
@@ -400,6 +499,11 @@ class App {
     this.camera.markDirty();
   }
 
+  /**
+   * Rebuilds the view direction button grid based on camera settings
+   * (4 or 8 cardinal directions). Highlights the currently active view.
+   * Each button, when clicked, sets the camera to that direction and re-fits.
+   */
   _updateViewButtons() {
     const labels = this.camera.eightDir
       ? ['N','NE','E','SE','S','SW','W','NW']
@@ -422,6 +526,13 @@ class App {
     });
   }
 
+  /**
+   * Loads a Potree v2.0 dataset from a metadata URL.
+   * Disposes of any previously loaded cloud, initializes the streaming
+   * octree geometry, configures the LRU GPU budget, and fits the view.
+   * @param {string} url - URL to the Potree metadata JSON or cloud.js entry point
+   * @returns {Promise<void>}
+   */
   async loadPotreeDataset(url) {
     if (this._loading) { console.warn('Load already in progress'); return; }
     this._loading = true;
@@ -518,6 +629,14 @@ class App {
     }
   }
 
+  /**
+   * Loads a point cloud file from a File object. Automatically detects the format
+   * (PLY, LAS, LAZ, XYZ, RXP, E57), parses it, decompresses LAZ if needed,
+   * runs the octree/pick-grid worker, uploads data to the GPU, and fits the view.
+   * Handles large LAS files (>2GB) via the tiling loader.
+   * @param {File} file - The file to load
+   * @returns {Promise<void>}
+   */
   async loadFile(file) {
     if (this._loading) { console.warn('Load already in progress'); return; }
     this._loading = true;
@@ -805,6 +924,11 @@ class App {
     }
   }
 
+  /**
+   * Displays the current measurement in the measurement info panel.
+   * Shows horizontal, vertical, and euclidean distances along with
+   * the coordinates of the two measured points.
+   */
   _showMeasurement() {
     const d = this.measurement.getDistances(this.cloud);
     if (!d) return;
@@ -818,6 +942,10 @@ class App {
       `<span style="color:#8b949e;font-size:0.7rem">P0 (${d.p0.map(v => v.toFixed(2)).join(', ')}) → P1 (${d.p1.map(v => v.toFixed(2)).join(', ')})</span>`;
   }
 
+  /**
+   * Clears all measurement points, hides the measurement info panel,
+   * and resets the measurement button state.
+   */
   clearMeasurement() {
     this.measurement.clear();
     document.getElementById('measure-info').classList.remove('visible');
@@ -826,6 +954,15 @@ class App {
     this.measurement.active = false;
   }
 
+  /**
+   * Main render loop called via requestAnimationFrame.
+   * Updates FPS controls, camera, checks for dirty state (camera movement,
+   * cloud transforms, new LOD nodes), renders the scene when needed,
+   * draws the minimap, gizmo overlay, measurement overlays, and updates HUD.
+   * Throttles minimap and HUD updates to every 4th frame for performance.
+   * Skips non-essential rendering when WebRTC streaming is active.
+   * @param {number} now - High-resolution timestamp from requestAnimationFrame
+   */
   _loop(now) {
     if (this._disposed) return;
 
@@ -932,6 +1069,11 @@ class App {
     requestAnimationFrame((t) => this._loop(t));
   }
 
+  /**
+   * Updates the classification mode button state based on whether the
+   * currently loaded point cloud supports classification data.
+   * Disables the button and reverts to RGB mode if classification is not available.
+   */
   _updateClassificationButton() {
     const btn = document.querySelector('.mode-btns button[data-mode="classification"]');
     if (!btn) return;
@@ -947,6 +1089,11 @@ class App {
     }
   }
 
+  /**
+   * Disposes all application resources: renderer, loaders, point cloud,
+   * overlays, FPS controls, VR session, streaming connections, and workers.
+   * Sets the disposed flag to stop the render loop permanently.
+   */
   dispose() {
     this._disposed = true;
     this._abortController.abort();
@@ -983,6 +1130,10 @@ class App {
     }
   }
 
+  /**
+   * Updates the point budget slider value, label, and auto-budget checkbox
+   * to reflect the current point cloud's visibility system budget.
+   */
   _updateBudgetSlider() {
     const budget = this.cloud ? this.cloud.visibilitySystem.pointBudget : this._pointBudget;
     const slider = document.getElementById('point-budget');
@@ -994,6 +1145,11 @@ class App {
     if (autoChk) autoChk.checked = this._autoScaleBudget;
   }
 
+  /**
+   * Toggles the WebXR VR session on/off. Starts or ends immersive VR
+   * rendering and updates the VR button label accordingly.
+   * @returns {Promise<void>}
+   */
   async toggleVR() {
     if (this.vrMode.isActive) {
       await this.vrMode.endSession();
@@ -1010,6 +1166,11 @@ class App {
     }
   }
 
+  /**
+   * Starts a WebRTC streaming session via PeerJS, capturing the main canvas
+   * at 60fps and enabling remote control through data channel signals.
+   * @returns {Promise<void>}
+   */
   async startStreaming() {
     if (this._streaming) return;
     
@@ -1191,6 +1352,10 @@ class App {
     });
   }
 
+  /**
+   * Stops the active WebRTC streaming session, destroys the PeerJS connection,
+   * and resets the streaming UI to its default state.
+   */
   stopStreaming() {
     if (!this._streaming) return;
     

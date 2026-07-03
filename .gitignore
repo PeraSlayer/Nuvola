@@ -1,2 +1,15 @@
 .DS_Store
 example/large-test/
+
+# Binary point cloud data (too large for git)
+*.ply
+*.bin
+datasets/
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon
+
+# Thumbnails
+._*

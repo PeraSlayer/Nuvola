@@ -1,3 +1,21 @@
+/**
+ * @file shader.js
+ * @description GLSL shader source strings for the WebGL2 point-cloud renderer.
+ *   Exports vertex/fragment shaders for three programs:
+ *     - POINT  (splats a vertex-coloured point, writes colour + depth-encoded G-buffer)
+ *     - DEPTH  (minimal pass for depth pre-fill; not currently used in standard pipeline)
+ *     - LIGHT  (full-screen quad that computes diffuse shading from the G-buffer)
+ *
+ *   All shaders use GLSL ES 3.00 (#version 300 es).
+ */
+
+/**
+ * Vertex shader for point-cloud rendering.
+ * Transforms each point through either an orthographic/cavalier projection
+ * (u_cameraMode = 0) or a standard perspective view/projection matrix
+ * (u_cameraMode = 1). Computes colour based on the active u_colorMode,
+ * passes depth, height, point-size, and opacity to the fragment shader.
+ */
 export const POINT_VERTEX_SHADER = `#version 300 es
   precision highp float;
   layout(location = 0) in vec3 a_position;
@@ -141,6 +159,12 @@ export const POINT_VERTEX_SHADER = `#version 300 es
       } else v_color = vec3(v_depth);
   }`;
 
+/**
+ * Fragment shader for point splatting.
+ * Discards fragments outside the circular point mask. Supports two post-processing
+ * effects: dreamy (gaussian glow overlay) and sketchfabOpacity (soft-edge fade).
+ * Outputs to two colour attachments: RGB (outColor) and depth-encoded (outDepth).
+ */
 export const POINT_FRAGMENT_SHADER = `#version 300 es
   precision highp float;
   in vec3 v_color;
@@ -174,6 +198,11 @@ export const POINT_FRAGMENT_SHADER = `#version 300 es
     outDepth = vec4(v_depth, v_height, 0.0, 1.0);
   }`;
 
+/**
+ * Minimal vertex shader for the depth pre-pass.
+ * Only transforms position and passes a normalised depth value downstream.
+ * Supports both orthographic (mode 0) and perspective (mode 1) camera modes.
+ */
 export const DEPTH_VERTEX_SHADER = `#version 300 es
   precision highp float;
   layout(location = 0) in vec3 a_position;
@@ -215,6 +244,10 @@ export const DEPTH_VERTEX_SHADER = `#version 300 es
     }
   }`;
 
+/**
+ * Fragment shader for the depth pre-pass.
+ * Writes zero colour and the incoming depth value to the G-buffer.
+ */
 export const DEPTH_FRAGMENT_SHADER = `#version 300 es
   precision highp float;
   in float v_depth;
@@ -225,6 +258,11 @@ export const DEPTH_FRAGMENT_SHADER = `#version 300 es
     outDepth = vec4(v_depth, 0.0, 0.0, 1.0);
   }`;
 
+/**
+ * Full-screen quad vertex shader.
+ * Uses gl_VertexID to generate a triangle-strip covering NDC [-1,1].
+ * Passes through UV coordinates for texture sampling.
+ */
 export const QUAD_VERTEX_SHADER = `#version 300 es
   precision highp float;
   const vec2 pos[4] = vec2[4](vec2(-1,-1),vec2(1,-1),vec2(-1,1),vec2(1,1));
@@ -235,6 +273,14 @@ export const QUAD_VERTEX_SHADER = `#version 300 es
     gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0);
   }`;
 
+/**
+ * Full-screen lighting fragment shader.
+ * Samples the G-buffer's colour and depth textures. Computes a screen-space
+ * normal from depth differences and applies a simple diffuse + ambient
+ * directional light model. Pixels with alpha < 0.5 are considered background;
+ * if sky is enabled they are filled with a vertical gradient, otherwise with
+ * a dark grey.
+ */
 export const LIGHT_FRAGMENT_SHADER = `#version 300 es
   precision highp float;
   in vec2 v_uv;

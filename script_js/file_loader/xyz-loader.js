@@ -1,3 +1,15 @@
+/**
+ * XYZ/TXT/PTS ASCII point cloud loader with Web Worker-based parsing.
+ *
+ * Parses space-, tab-, or comma-separated text point cloud files.
+ * Automatically detects the presence of RGB color columns (6+ fields per
+ * line) and intensity data (4+ fields). Supports comment lines starting
+ * with '#' or '//'. All parsing runs in a dedicated Web Worker to keep
+ * the main thread responsive even with large text files.
+ *
+ * @module xyz-loader
+ */
+
 /*
 ===============================================================================
 File: xyz-loader.js
@@ -29,6 +41,16 @@ API asincrona usata dall'app principale.
 const XYZ_WORKER_SOURCE = `
 'use strict';
 
+/**
+ * Counts the number of valid data lines in the buffer.
+ *
+ * Skips empty lines and comment lines (starting with '#' or '//') while
+ * counting only lines that contain potential point data. Returns the
+ * total count for pre-allocation of typed arrays.
+ *
+ * @param {ArrayBuffer} buf - The raw file buffer.
+ * @returns {number} Number of data lines.
+ */
 function countDataLines(buf) {
   var b = new Uint8Array(buf), n = b.length, c = 0, i = 0;
   while (i < n) {
@@ -46,6 +68,20 @@ function countDataLines(buf) {
   return c;
 }
 
+/**
+ * Parses the XYZ body text into typed arrays.
+ *
+ * Performs two passes over the raw bytes. The first pass detects whether
+ * colors are present by examining the first valid data line. The second
+ * pass parses all lines into pre-allocated Float32Array (positions,
+ * intensity) and Uint8Array (colors) with intensity normalization to
+ * 0..1. Defaults to a lavender color (180, 180, 200) when no color data
+ * is present.
+ *
+ * @param {ArrayBuffer} buf - The raw file buffer.
+ * @param {number} count - Expected number of data lines (from countDataLines).
+ * @returns {{positions: Float32Array, colors: Uint8Array, intensity: Float32Array, count: number, hasColor: boolean, hasIntensity: boolean}} Parsed point data.
+ */
 function parseXYZ(buf, count) {
   var decoder = new TextDecoder('utf-8');
   var b = new Uint8Array(buf), n = b.length;
@@ -100,6 +136,7 @@ function parseXYZ(buf, count) {
     if (colorPresent && p.length >= 6) {
       var r = parseFloat(p[3]), g = parseFloat(p[4]), bv = parseFloat(p[5]);
       if (isNaN(r) || isNaN(g) || isNaN(bv)) { r = g = bv = 128; }
+      // Scale float 0..1 to 0..255 byte range
       if (r <= 1 && g <= 1 && bv <= 1) { r *= 255; g *= 255; bv *= 255; }
       colors[i3] = Math.min(255, Math.max(0, r));
       colors[i3 + 1] = Math.min(255, Math.max(0, g));
@@ -122,7 +159,7 @@ function parseXYZ(buf, count) {
     idx++;
   }
 
-  // Normalize intensity
+  // Normalize intensity to 0..1 range
   var iMin = Infinity, iMax = -Infinity;
   for (var i = 0; i < idx; i++) {
     var v = intensity[i];
@@ -146,6 +183,15 @@ function parseXYZ(buf, count) {
   };
 }
 
+/**
+ * Web Worker message handler for XYZ parsing.
+ *
+ * Receives the raw ArrayBuffer, counts data lines, delegates to parseXYZ,
+ * and posts the typed arrays back to the main thread using transferable
+ * objects for zero-copy transfer.
+ *
+ * @listens MessageEvent
+ */
 self.onmessage = function(e) {
   try {
     var buf = e.data;
@@ -162,11 +208,17 @@ self.onmessage = function(e) {
 
 /** Loads ASCII point clouds (XYZ/TXT/PTS) via a Web Worker. */
 export class XYZLoader {
+  /**
+   * Creates a Blob URL for the inline XYZ worker source.
+   */
   constructor() {
     const blob = new Blob([XYZ_WORKER_SOURCE], { type: 'application/javascript' });
     this._workerUrl = URL.createObjectURL(blob);
   }
 
+  /**
+   * Revokes the worker Blob URL and cleans up resources.
+   */
   dispose() {
     if (this._workerUrl) {
       URL.revokeObjectURL(this._workerUrl);
@@ -174,15 +226,34 @@ export class XYZLoader {
     }
   }
   
+  /**
+   * Checks whether a file has an XYZ/TXT/PTS extension.
+   *
+   * @param {File} file - The file to check.
+   * @returns {boolean} True if the file is an XYZ/TXT/PTS file.
+   */
   static isXYZFile(file) {
     const n = file.name.toLowerCase();
     return n.endsWith('.xyz') || n.endsWith('.txt') || n.endsWith('.pts');
   }
   
+  /**
+   * Reads an XYZ/TXT/PTS file into an ArrayBuffer.
+   *
+   * @param {File} file - The DOM File object.
+   * @returns {Promise<ArrayBuffer>} The raw file buffer.
+   */
   static async readFile(file) {
     return await file.arrayBuffer();
   }
   
+  /**
+   * Parses an XYZ/TXT/PTS buffer in a Web Worker and returns structured
+   * point cloud data.
+   *
+   * @param {ArrayBuffer} buf - The raw file buffer.
+   * @returns {Promise<{ok: boolean, positions: Float32Array, colors: Uint8Array, intensity: Float32Array, count: number, hasColor: boolean, hasIntensity: boolean}>} Parsed point data.
+   */
   load(buf) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(this._workerUrl);

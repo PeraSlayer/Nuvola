@@ -1,3 +1,16 @@
+/**
+ * RXP (Riegl binary) point cloud loader with Web Worker-based heuristic parsing.
+ *
+ * RXP files do not have a well-documented header format, so the parser uses
+ * multiple heuristic strategies to detect the point count, record stride, and
+ * data layout. It probes various byte offsets for plausible uint32 counts,
+ * estimates stride by comparing total file size with expected point sizes, and
+ * determines whether RGB color data is embedded based on record stride length.
+ * All parsing runs in a Web Worker to avoid blocking the UI.
+ *
+ * @module rxp-loader
+ */
+
 /*
 ===============================================================================
 File: rxp-loader.js
@@ -24,6 +37,19 @@ formato resta piu euristico rispetto a PLY/LAS/XYZ.
 const RXP_WORKER_SOURCE = `
 'use strict';
 
+/**
+ * Parses a Riegl RXP binary point cloud buffer using heuristic detection.
+ *
+ * Because RXP files lack a standardized header, this function iterates
+ * through plausible byte offsets to find a consistent point count, then
+ * determines the record stride (number of bytes per point) and whether
+ * RGB color channels are present. Points are read as XYZ double-precision
+ * coordinates with unsigned short intensity. Missing colors are filled
+ * with grayscale derived from normalized intensity.
+ *
+ * @param {ArrayBuffer} buffer - The raw RXP file buffer.
+ * @returns {{positions: Float32Array, colors: Uint8Array, intensity: Float32Array, count: number, hasColor: boolean, hasIntensity: boolean}} Parsed point data.
+ */
 function parseRXP(buffer) {
   const dv = new DataView(buffer);
   const fileSize = buffer.byteLength;
@@ -201,7 +227,7 @@ function parseRXP(buffer) {
   debug("Min Z: " + minZ + " Max Z: " + maxZ);
   debug("Min Intensity: " + minI + " Max Intensity: " + maxI);
   
-  // Normalizza intensità
+  // Normalizza intensità to 0..1
   const iRange = maxI - minI;
   if (iRange > 0) {
     for (let i = 0; i < pointCount; i++) {
@@ -234,6 +260,15 @@ function parseRXP(buffer) {
   };
 }
 
+/**
+ * Web Worker message handler for RXP parsing.
+ *
+ * Receives the raw ArrayBuffer, delegates to parseRXP, and posts the
+ * typed arrays back to the main thread using transferable objects
+ * for zero-copy transfer.
+ *
+ * @listens MessageEvent
+ */
 self.onmessage = function(e) {
   try {
     const buffer = e.data;
@@ -248,11 +283,17 @@ self.onmessage = function(e) {
 
 /** Loads Riegl RXP binary point clouds via a Web Worker. */
 export class RXPLoader {
+  /**
+   * Creates a Blob URL for the inline RXP worker source.
+   */
   constructor() {
     const blob = new Blob([RXP_WORKER_SOURCE], { type: 'application/javascript' });
     this._workerUrl = URL.createObjectURL(blob);
   }
 
+  /**
+   * Revokes the worker Blob URL and cleans up resources.
+   */
   dispose() {
     if (this._workerUrl) {
       URL.revokeObjectURL(this._workerUrl);
@@ -260,15 +301,34 @@ export class RXPLoader {
     }
   }
   
+  /**
+   * Checks whether a file has an .rxp extension.
+   *
+   * @param {File} file - The file to check.
+   * @returns {boolean} True if the file is an RXP file.
+   */
   static isRXPFile(file) {
     const n = file.name.toLowerCase();
     return n.endsWith('.rxp');
   }
   
+  /**
+   * Reads an RXP file into an ArrayBuffer.
+   *
+   * @param {File} file - The DOM File object.
+   * @returns {Promise<ArrayBuffer>} The raw file buffer.
+   */
   static async readFile(file) {
     return await file.arrayBuffer();
   }
   
+  /**
+   * Parses an RXP buffer in a Web Worker and returns structured point
+   * cloud data.
+   *
+   * @param {ArrayBuffer} arrayBuffer - The raw RXP file buffer.
+   * @returns {Promise<{ok: boolean, positions: Float32Array, colors: Uint8Array, intensity: Float32Array, count: number, hasColor: boolean, hasIntensity: boolean}>} Parsed point data.
+   */
   load(arrayBuffer) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(this._workerUrl);

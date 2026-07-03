@@ -1,9 +1,19 @@
+<!--
+Nuvola Point Cloud Viewer — Main Application Page
+--------------------------------------------------
+A WebGL2-based point cloud viewer with real-time rendering,
+WebRTC streaming, measurement tools, and support for PLY, LAS,
+LAZ, XYZ, and E57 file formats. Features an Apple-inspired UI
+with a collapsible sidebar for controls.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- Prevent pinch-zoom and scaling on mobile for touch orbit controls -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Nuvola</title>
+  <!-- Import map for Three.js module resolution -->
   <script type="importmap">
   {
     "imports": {
@@ -14,10 +24,13 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+<!-- Root application container -->
 <div id="app">
+  <!-- ====== SIDEBAR: Controls and settings panel ====== -->
   <aside id="sidebar">
     <h1>Nuvola<span>Point Cloud Viewer</span></h1>
 
+    <!-- Load Data Panel: file selection via browser dialog or Potree URL -->
     <div class="panel">
       <h2>Load Data</h2>
       <button class="primary full" id="btn-load">Open Point Cloud</button>
@@ -26,7 +39,8 @@
       <button class="full" id="btn-load-potree" style="margin-top:4px">Load Potree Dataset</button>
       <p class="stat mt-2" id="file-info">No file loaded<br/>PLY, LAS, LAZ, XYZ, E57</p>
     </div>
-    
+
+    <!-- View Panel: zoom slider, cardinal-direction buttons, orientation snaps, reset -->
     <div class="panel">
       <h2>View</h2>
       <div class="row"><label>Zoom</label><input type="range" id="zoom-slider" min="0.01" max="1000" step="0.01" value="1" /><span class="val" id="zoom-val">1.0</span></div>
@@ -51,6 +65,7 @@
       <button id="btn-reset" class="full mt-1">Reset View</button>
     </div>
 
+    <!-- Color Mode Panel: switch between RGB, height, intensity, depth, classification -->
     <div class="panel">
       <h2>Color Mode</h2>
       <div class="mode-btns">
@@ -62,6 +77,7 @@
       </div>
     </div>
 
+    <!-- Point Size Panel: auto (zoom-based) vs fixed, size slider, sketch/dreamy effects -->
     <div class="panel">
       <h2>Point Size</h2>
       <div class="row"><label>Type</label><select id="point-size-type"><option value="1">Auto (zoom)</option><option value="0">Fixed</option></select></div>
@@ -70,6 +86,7 @@
       <div class="row mt-1"><label>Dreamy</label><input type="range" id="dreamy" min="0" max="1" step="0.05" value="0" /><span class="val" id="dreamy-val">Off</span></div>
     </div>
 
+    <!-- Lighting Panel: directional light azimuth/elevation, ambient, depth-based shading -->
     <div class="panel">
       <h2>Lighting</h2>
       <div class="row"><label>Light Azimuth</label><input type="range" id="light-az" min="0" max="360" step="1" value="315" /><span class="val" id="light-az-val">315°</span></div>
@@ -78,6 +95,7 @@
       <label><input type="checkbox" id="chk-shading" checked /> Depth-based shading</label>
     </div>
 
+    <!-- Background Panel: sky gradient toggle and top/bottom color pickers -->
     <div class="panel">
       <h2>Background</h2>
       <label><input type="checkbox" id="chk-sky" checked /> Sky gradient</label>
@@ -85,12 +103,14 @@
       <div class="row"><label>Bottom Color</label><input type="color" id="sky-color-bottom" value="#b3d9ff" /></div>
     </div>
 
+    <!-- Measure Panel: distance measurement tool between two picked points -->
     <div class="panel">
       <h2>Measure</h2>
       <button id="btn-measure" class="full">Measure Distance</button>
       <button id="btn-clear-measure" class="full mt-1">Clear Measurement</button>
     </div>
 
+    <!-- Streaming Panel: WebRTC-based remote streaming via PeerJS -->
     <div class="panel">
       <h2>Streaming</h2>
       <button id="btn-stream" class="primary full">Start Streaming</button>
@@ -99,18 +119,28 @@
 
   </aside>
 
+  <!-- ====== MAIN: 3D viewport area ====== -->
   <main id="main">
+    <!-- Mobile-friendly sidebar toggle button -->
     <button id="toggle-sidebar">☰</button>
+    <!-- WebGL2 rendering canvas for the point cloud -->
     <canvas id="glcanvas"></canvas>
+    <!-- Drag-and-drop overlay shown when files are dragged over the window -->
     <div id="drop-overlay"><p><strong>Drop to open</strong>PLY, LAS, LAZ, XYZ, E57</p></div>
+    <!-- Heads-up display showing point count, FPS, and camera info -->
     <div id="hud"></div>
+    <!-- Minimap showing a top-down overview of the point cloud -->
     <div id="minimap"><canvas id="minimap-canvas" width="140" height="140"></canvas></div>
+    <!-- Measurement info display (hidden by default) -->
     <div id="measure-info"></div>
+    <!-- Loading spinner shown during point cloud parsing -->
     <div id="loading"><div class="spinner"></div><span id="loading-text">Loading point cloud…</span></div>
   </main>
 </div>
 
+  <!-- PeerJS library for WebRTC peer-to-peer connections -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- Main application entry point, loaded as an ES module -->
   <script type="module" src="script_js/main/main.js"></script>
 </body>
 </html>

@@ -1,3 +1,18 @@
+/**
+ * @file renderer.js
+ * @description WebGL2 point cloud renderer implementing a deferred shading pipeline.
+ *   Uploads point cloud geometry into GPU buffers, renders points into a
+ *   color+depth framebuffer (G-buffer), and then composites the result with a
+ *   full-screen lighting pass. Supports both standard isometric projection and
+ *   perspective (FPS) camera modes, multiple colour-mapping modes (rgb, height,
+ *   intensity, depth, classification), dynamic batching of octree nodes,
+ *   optional cloud-transform uniforms, sketchfab-style opacity, and dreamy glow.
+ *
+ *   Key classes:
+ *     UniformGuard – avoids redundant WebGL uniform uploads.
+ *     Renderer     – owns the GL context, shaders, buffers, FBO, and draw loop.
+ */
+
 import {
   POINT_VERTEX_SHADER,
   POINT_FRAGMENT_SHADER,
@@ -7,6 +22,7 @@ import {
   LIGHT_FRAGMENT_SHADER,
 } from './shader.js';
 
+/** Enum mapping colour-mode strings to shader uniform values. */
 const COLOR_MODE_VALUE = Object.freeze({
   rgb: 0,
   height: 1,
@@ -15,14 +31,33 @@ const COLOR_MODE_VALUE = Object.freeze({
   classification: 4,
 });
 
+/** Default light direction vector in eye space. */
 const DEFAULT_LIGHT_DIR = Object.freeze([0.5, 0.5, 1]);
+
+/** GPU memory footprint per point in bytes (positions + colour + intensity + classification + opacity). */
 const BYTES_PER_POINT_GPU = 12 + 3 + 4 + 1 + 4; // position(3×4) + color(3) + intensity(4) + classification(1) + opacity(4)
+
+/** Upper bound on device-pixel ratio to prevent excessive FBO sizes. */
 const MAX_DEVICE_PIXEL_RATIO = 3;
+
+/** Default ambient light contribution (0–1). */
 const DEFAULT_AMBIENT = 0.25;
+
+/** Default point size in screen pixels. */
 const DEFAULT_POINT_SIZE = 3.0;
+
+/** Base batch capacity when available VRAM is unknown. */
 const BATCH_CAPACITY_BASE = 200_000;
+
+/** Absolute upper limit on batch capacity regardless of VRAM. */
 const BATCH_CAPACITY_CEILING = 50_000_000;
 
+/**
+ * Heuristic to determine how many points can be batched into a single
+ * draw call based on the GPU's texture/buffer size limits.
+ * @param {WebGL2RenderingContext} gl
+ * @returns {number} Maximum points per batch buffer.
+ */
 function detectBatchCapacity(gl) {
   const dbgRender = gl.getExtension('WEBGL_debug_renderer_info');
   let vramMB = 512;
@@ -40,6 +75,11 @@ function detectBatchCapacity(gl) {
   return Math.min(cap, BATCH_CAPACITY_CEILING);
 }
 
+/**
+ * Estimate VRAM in megabytes, primarily used for LRU cache budgeting.
+ * @param {WebGL2RenderingContext} gl
+ * @returns {number} VRAM estimate in MB.
+ */
 function detectVRAM_MB(gl) {
   const dbgRender = gl.getExtension('WEBGL_debug_renderer_info');
   if (!dbgRender) return 512;
@@ -51,25 +91,52 @@ function detectVRAM_MB(gl) {
   return Math.max(512, maxBuf ? Math.floor(maxBuf / (1024 * 1024)) : 512);
 }
 
+/**
+ * Wrapper around WebGL2 uniform setters that skips calls when the value has
+ * not changed since the last invocation, reducing redundant GPU traffic.
+ */
 class UniformGuard {
+  /**
+   * @param {WebGL2RenderingContext} gl
+   */
   constructor(gl) {
     this.gl = gl;
+    /** @type {Map<string, number>} */
     this.scalars = new Map();
+    /** @type {Map<string, Float32Array>} */
     this.refs = new Map();
   }
 
+  /**
+   * Set a 1-component float uniform (no-op if unchanged).
+   * @param {WebGLUniformLocation} loc
+   * @param {string} key - Unique key for deduplication.
+   * @param {number} val
+   */
   uniform1f(loc, key, val) {
     if (this.scalars.get(key) === val) return;
     this.scalars.set(key, val);
     this.gl.uniform1f(loc, val);
   }
 
+  /**
+   * Set a 1-component integer uniform (no-op if unchanged).
+   * @param {WebGLUniformLocation} loc
+   * @param {string} key - Unique key for deduplication.
+   * @param {number} val
+   */
   uniform1i(loc, key, val) {
     if (this.scalars.get(key) === val) return;
     this.scalars.set(key, val);
     this.gl.uniform1i(loc, val);
   }
 
+  /**
+   * Set a 2-float-vector uniform (no-op if unchanged).
+   * @param {WebGLUniformLocation} loc
+   * @param {string} key
+   * @param {Float32Array|number[]} val
+   */
   uniform2fv(loc, key, val) {
     const prev = this.refs.get(key);
     if (prev && prev.length === 2 && prev[0] === val[0] && prev[1] === val[1]) return;
@@ -77,6 +144,12 @@ class UniformGuard {
     this.gl.uniform2fv(loc, val);
   }
 
+  /**
+   * Set a 3-float-vector uniform (no-op if unchanged).
+   * @param {WebGLUniformLocation} loc
+   * @param {string} key
+   * @param {Float32Array|number[]} val
+   */
   uniform3fv(loc, key, val) {
     const prev = this.refs.get(key);
     if (prev && prev.length === 3 && prev[0] === val[0] && prev[1] === val[1] && prev[2] === val[2]) return;
@@ -84,6 +157,12 @@ class UniformGuard {
     this.gl.uniform3fv(loc, val);
   }
 
+  /**
+   * Set a 4x4 matrix uniform (no-op if all 16 elements are unchanged).
+   * @param {WebGLUniformLocation} loc
+   * @param {string} key
+   * @param {Float32Array|number[]} val - Column-major 16-element array.
+   */
   uniformMatrix4fv(loc, key, val) {
     const prev = this.refs.get(key);
     if (prev && prev.length === 16 && prev[0] === val[0] && prev[1] === val[1] &&
@@ -97,7 +176,19 @@ class UniformGuard {
   }
 }
 
+/**
+ * WebGL2 deferred-shading point-cloud renderer.
+ *
+ * Owns the GL context, compiles/link shaders, manages vertex buffers and VAOs,
+ * maintains a framebuffer with dual colour attachments (RGB + depth-encoded),
+ * and runs a two-pass render loop: point splatting into the G-buffer followed by
+ * a full-screen lighting pass. Supports dynamic index-buffer based draws for
+ * octree LOD selection as well as a batched-draw path for multiple octree nodes.
+ */
 export class Renderer {
+  /**
+   * @param {HTMLCanvasElement} canvas - A canvas element that will receive the WebGL2 context.
+   */
   constructor(canvas) {
     this.canvas = canvas;
     this.gl = canvas.getContext('webgl2', {
@@ -110,44 +201,67 @@ export class Renderer {
     this.width = 0;
     this.height = 0;
 
+    /** @type {object|null} The uploaded point-cloud object. */
     this._cloud = null;
+    /** @type {WebGLVertexArrayObject|null} VAO for single-cloud draws. */
     this._cloudVao = null;
     this._lastDrawCount = 0;
     this._gpuBytes = 0;
+    /** @type {WebGLRenderbuffer|null} */
     this._depthRB = null;
     this._fboValid = false;
+    /** @type {number[]} Inverse texture size for lighting pass. */
     this._lightTexel = [1, 1];
 
+    /** @type {WebGLBuffer|null} Dynamic element array buffer for indexed draws. */
     this._dynamicIndexBuf = null;
+    /** @type {WebGLVertexArrayObject|null} VAO that uses the dynamic index buffer. */
     this._dynamicIndexVao = null;
     this._dynamicIndexBufSize = 0;
 
     this._benchFrameMs = 0;
+    /** @type {object|null} Per-frame profiling data. */
     this._profile = null;
     this._contextLost = false;
 
+    /** @type {Float32Array} Scratch buffer for cloud rotation uniform. */
     this._cloudRotBuf = new Float32Array(3);
+    /** @type {Float32Array} Scratch buffer for cloud scale uniform. */
     this._cloudScaleBuf = new Float32Array(3);
 
     this._batchCapacity = detectBatchCapacity(this.gl);
     this._detectedVRAM_MB = detectVRAM_MB(this.gl);
     this._suggestedLRUBudget = Math.floor(this._detectedVRAM_MB * 0.6) * 1024 * 1024;
+
+    // Batch-mode GPU resources (allocated on first uploadNode call).
+    /** @type {WebGLVertexArrayObject|null} */
     this._batchVao = null;
+    /** @type {WebGLBuffer|null} */
     this._batchVboPos = null;
+    /** @type {WebGLBuffer|null} */
     this._batchVboCol = null;
+    /** @type {WebGLBuffer|null} */
     this._batchVboInt = null;
+    /** @type {WebGLBuffer|null} */
     this._batchVboClass = null;
+    /** @type {WebGLBuffer|null} */
     this._batchVboOpacity = null;
+    /** @type {WebGLBuffer|null} */
     this._batchIndexBuf = null;
     this._batchTotalPoints = 0;
     this._batchDrawStart = 0;
     this._batchContiguous = true;
     this._batchIndexDirty = true;
     this._batchNextOffset = 0;
+    /** @type {{offset:number, count:number}[]} Free regions in batch buffer. */
     this._batchFreeRegions = [];
+    /** @type {(number|null)[]} Cached visible node ids for index-diff detection. */
     this._batchVisibleNodeIds = [];
+    /** @type {(number|null)[]} */
     this._batchVisibleOffsets = [];
+    /** @type {(number|null)[]} */
     this._batchVisibleCounts = [];
+    /** @type {number[]} Alternating start/count pairs for batched draw runs. */
     this._batchRuns = [];
 
     this._initShaders();
@@ -166,11 +280,25 @@ export class Renderer {
     canvas.addEventListener('webglcontextrestored', this._onContextRestored);
   }
 
+  /**
+   * Throw an error if a WebGL resource (e.g. buffer, texture) failed to create.
+   * @param {*} resource
+   * @param {string} label - Human-readable name for the error message.
+   * @returns {*} The resource, if valid.
+   * @throws {Error}
+   */
   _requireResource(resource, label) {
     if (!resource) throw new Error(`Failed to create ${label}`);
     return resource;
   }
 
+  /**
+   * Compile a shader from GLSL source.
+   * @param {number} type - gl.VERTEX_SHADER or gl.FRAGMENT_SHADER.
+   * @param {string} src - GLSL source string.
+   * @returns {WebGLShader}
+   * @throws {Error} on compilation failure.
+   */
   _compile(type, src) {
     const gl = this.gl;
     const sh = this._requireResource(gl.createShader(type), 'shader');
@@ -182,6 +310,13 @@ export class Renderer {
     return sh;
   }
 
+  /**
+   * Link vertex and fragment shaders into a program.
+   * @param {WebGLShader} vs - Compiled vertex shader.
+   * @param {WebGLShader} fs - Compiled fragment shader.
+   * @returns {WebGLProgram}
+   * @throws {Error} on link failure.
+   */
   _link(vs, fs) {
     const gl = this.gl;
     const prog = this._requireResource(gl.createProgram(), 'program');
@@ -194,6 +329,10 @@ export class Renderer {
     return prog;
   }
 
+  /**
+   * Create shader programs and cache uniform/attribute locations.
+   * Called once at construction and on context restore.
+   */
   _initShaders() {
     const gl = this.gl;
 
@@ -215,6 +354,7 @@ export class Renderer {
     gl.deleteShader(vsQuad);
     gl.deleteShader(fsLight);
 
+    /** @type {Object<string, WebGLUniformLocation>} */
     this.uPoint = {
       resolution: gl.getUniformLocation(this.progPoint, 'u_resolution'),
       pan: gl.getUniformLocation(this.progPoint, 'u_pan'),
@@ -247,6 +387,7 @@ export class Renderer {
       dreamy: gl.getUniformLocation(this.progPoint, 'u_dreamy'),
     };
 
+    /** @type {Object<string, WebGLUniformLocation>} */
     this.uLight = {
       colorTex: gl.getUniformLocation(this.progLight, 'u_colorTex'),
       depthTex: gl.getUniformLocation(this.progLight, 'u_depthTex'),
@@ -267,6 +408,7 @@ export class Renderer {
     this.attrClass = gl.getAttribLocation(this.progPoint, 'a_classification');
     this.attrOpacity = gl.getAttribLocation(this.progPoint, 'a_opacity');
 
+    /** @type {Object<string, WebGLUniformLocation>} */
     this.uDepth = {
       resolution: gl.getUniformLocation(this.progDepth, 'u_resolution'),
       pan: gl.getUniformLocation(this.progDepth, 'u_pan'),
@@ -282,6 +424,10 @@ export class Renderer {
     this._depthUniforms = new UniformGuard(gl);
   }
 
+  /**
+   * Create the VBOs for single-cloud rendering and the full-screen quad VAO.
+   * Also initialises batch buffers.
+   */
   _initBuffers() {
     const gl = this.gl;
 
@@ -295,6 +441,11 @@ export class Renderer {
     this._initBatchBuffers();
   }
 
+  /**
+   * Allocate (or re-create) the big batch vertex buffers and VAO.
+   * The capacity is determined by `_batchCapacity`. Existing resources are
+   * destroyed before new ones are created to allow resizing.
+   */
   _initBatchBuffers() {
     const gl = this.gl;
     const cap = this._batchCapacity;
@@ -347,6 +498,11 @@ export class Renderer {
     this._batchRuns.length = 0;
   }
 
+  /**
+   * Create the framebuffer with two RGBA8 colour attachments and a depth
+   * renderbuffer. Textures are created but their storage is allocated later
+   * in `_setupFBO`.
+   */
   _initFBO() {
     const gl = this.gl;
     this.fbo = this._requireResource(gl.createFramebuffer(), 'framebuffer');
@@ -354,10 +510,21 @@ export class Renderer {
     this.depthTex = this._requireResource(gl.createTexture(), 'depth texture');
   }
 
+  /**
+   * Clamp the device-pixel ratio to a reasonable maximum.
+   * @param {number} [value=window.devicePixelRatio]
+   * @returns {number}
+   */
   _devicePixelRatio(value = window.devicePixelRatio) {
     return Math.min(value || 1, MAX_DEVICE_PIXEL_RATIO);
   }
 
+  /**
+   * Configure a 2D RGBA8 texture with linear filtering and clamp-to-edge wrapping.
+   * @param {WebGLTexture} tex
+   * @param {number} width
+   * @param {number} height
+   */
   _configureRGBA8Texture(tex, width, height) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -368,6 +535,12 @@ export class Renderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
+  /**
+   * Resize the G-buffer textures and depth renderbuffer to match the current
+   * canvas size. Must be called whenever the canvas changes size.
+   * @param {number} w - Width in physical pixels.
+   * @param {number} h - Height in physical pixels.
+   */
   _setupFBO(w, h) {
     const gl = this.gl;
     this._configureRGBA8Texture(this.colorTex, w, h);
@@ -388,6 +561,12 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
+  /**
+   * Resize the canvas and internal framebuffer. CSS width/height are set to
+   * the logical (CSS) size, while the GL backing store uses physical pixels.
+   * @param {number} w - Logical (CSS) width.
+   * @param {number} h - Logical (CSS) height.
+   */
   resize(w, h) {
     const dpr = this._devicePixelRatio();
     const nw = Math.max(1, Math.floor(w * dpr));
@@ -406,6 +585,10 @@ export class Renderer {
     this._setupFBO(this.width, this.height);
   }
 
+  /**
+   * Re-initialise shaders, buffers, and FBO if they were lost due to a
+   * WebGL context loss event.
+   */
   _ensureResources() {
     this._contextLost = false;
     if (this.progPoint && this.progDepth && this.progLight) return;
@@ -417,10 +600,18 @@ export class Renderer {
     }
   }
 
+  /**
+   * Public method to explicitly restore GPU state after a context loss.
+   */
   restoreGPUState() {
     this._ensureResources();
   }
 
+  /**
+   * Upload a full point cloud into the single-cloud VBOs and create its VAO.
+   * Also sets up the dynamic index buffer used for octree-LOD indexed draws.
+   * @param {object} cloud - Point cloud object with positions, colors, optional intensity/classification/opacity arrays.
+   */
   uploadPointCloud(cloud) {
     this._ensureResources();
     const gl = this.gl;
@@ -463,12 +654,16 @@ export class Renderer {
 
     gl.bindVertexArray(null);
 
+    // Free CPU-side copies that are no longer needed when octree geometry is absent.
     if (!cloud.octreeGeometry) {
       cloud.colors = null;
       cloud.intensity = null;
     }
   }
 
+  /**
+   * Destroy the single-cloud VAOs and dynamic index buffer.
+   */
   _disposeCloudVAOs() {
     const gl = this.gl;
     if (this._cloudVao) { gl.deleteVertexArray(this._cloudVao); this._cloudVao = null; }
@@ -477,6 +672,12 @@ export class Renderer {
     this._dynamicIndexBufSize = 0;
   }
 
+  /**
+   * Upload a single octree node's geometry into the batch buffer system.
+   * A region is allocated from the batch pool; missing attributes get default
+   * fallback data. The node is tracked so that `removeNode` can free its space.
+   * @param {object} node - Octree node with `.geometryData` and `.onDispose` support.
+   */
   uploadNode(node) {
     const gl = this.gl;
     const gd = node.geometryData;
@@ -494,6 +695,7 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboPos);
     gl.bufferSubData(gl.ARRAY_BUFFER, offset * 3 * 4, gd.position);
 
+    // Default colour fallback: grey.
     let colData = gd.color;
     if (!colData) {
       colData = new Uint8Array(numPoints * 3);
@@ -524,6 +726,8 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this._batchVboOpacity);
     gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, opacityData);
 
+    // Register a one-shot dispose handler so the batch region is freed when
+    // the octree node is evicted.
     if (!node._rendererDisposeHandlerRegistered) {
       node._rendererDisposeHandlerRegistered = true;
       node.onDispose((n) => {
@@ -543,7 +747,14 @@ export class Renderer {
     this._batchIndexDirty = true;
   }
 
+  /**
+   * Try to allocate a contiguous region in the batch buffer for N points.
+   * Returns the start offset or -1 if no space is available.
+   * @param {number} numPoints
+   * @returns {number} Offset into the batch buffer or -1.
+   */
   _allocateBatchRegion(numPoints) {
+    // First, try to satisfy from the free-region pool.
     for (let i = 0; i < this._batchFreeRegions.length; i++) {
       const fr = this._batchFreeRegions[i];
       if (fr.count >= numPoints) {
@@ -558,17 +769,26 @@ export class Renderer {
       }
     }
 
+    // Otherwise, append to the end if enough capacity remains.
     if (this._batchNextOffset + numPoints > this._batchCapacity) return -1;
     const offset = this._batchNextOffset;
     this._batchNextOffset += numPoints;
     return offset;
   }
 
+  /**
+   * Return a used region back to the free-region pool.
+   * @param {number} offset
+   * @param {number} count
+   */
   _freeBatchRegion(offset, count) {
     this._batchFreeRegions.push({ offset, count });
     this._mergeFreeRegions();
   }
 
+  /**
+   * Coalesce adjacent free regions in the pool to reduce fragmentation.
+   */
   _mergeFreeRegions() {
     const fr = this._batchFreeRegions;
     fr.sort((a, b) => a.offset - b.offset);
@@ -581,6 +801,10 @@ export class Renderer {
     }
   }
 
+  /**
+   * Release a node's batch region so it can be reused.
+   * @param {object} node - Octree node previously uploaded via `uploadNode`.
+   */
   removeNode(node) {
     if (node._batchOffset != null && node._batchCount > 0) {
       this._freeBatchRegion(node._batchOffset, node._batchCount);
@@ -594,6 +818,9 @@ export class Renderer {
     if (this._gpuBytes < 0) this._gpuBytes = 0;
   }
 
+  /**
+   * Destroy all batch-mode GPU resources.
+   */
   _disposeBatchBuffers() {
     const gl = this.gl;
     if (this._batchVao) { gl.deleteVertexArray(this._batchVao); this._batchVao = null; }
@@ -615,6 +842,12 @@ export class Renderer {
     this._batchRuns.length = 0;
   }
 
+  /**
+   * Check whether the cached batch index is still valid for the given set of
+   * visible nodes (same ids in same order with same offsets/counts).
+   * @param {object[]} visibleNodes
+   * @returns {boolean}
+   */
   _isBatchIndexCurrent(visibleNodes) {
     if (this._batchIndexDirty) return false;
     if (visibleNodes.length !== this._batchVisibleNodeIds.length) return false;
@@ -631,6 +864,13 @@ export class Renderer {
     return true;
   }
 
+  /**
+   * Rebuild the batch draw order for a list of visible nodes. Nodes are
+   * depth-sorted (back to front) to help with semi-transparent points.
+   * Computes contiguous/non-contiguous draw ranges stored in `_batchRuns`.
+   * @param {object[]} visibleNodes
+   * @param {object|null} cameraPosition - {x,y,z} world position for depth sort.
+   */
   _rebuildBatchIndex(visibleNodes, cameraPosition) {
     const sortedNodes = this._sortNodesByDepth(visibleNodes, cameraPosition);
 
@@ -679,6 +919,12 @@ export class Renderer {
     this._batchIndexDirty = false;
   }
 
+  /**
+   * Sort nodes by squared distance to the camera (back-to-front).
+   * @param {object[]} nodes
+   * @param {object|null} cameraPosition - {x,y,z} world position.
+   * @returns {object[]} Sorted copy of nodes.
+   */
   _sortNodesByDepth(nodes, cameraPosition) {
     if (!cameraPosition || nodes.length < 2) return nodes;
 
@@ -699,6 +945,10 @@ export class Renderer {
     return sorted;
   }
 
+  /**
+   * Release all WebGL resources (VAOs, VBOs, textures, renderbuffers, programs).
+   * Also removes context-lost/restored event listeners.
+   */
   dispose() {
     const gl = this.gl;
     this.canvas.removeEventListener('webglcontextlost', this._onContextLost);
@@ -730,6 +980,10 @@ export class Renderer {
     this._fboValid = false;
   }
 
+  /**
+   * Estimate total GPU memory used by the renderer in MB.
+   * @returns {string} Formatted MB string (one decimal place).
+   */
   getMemoryMB() {
     let total = this._gpuBytes;
     if (this._dynamicIndexBuf) total += this._dynamicIndexBufSize;
@@ -739,26 +993,45 @@ export class Renderer {
     return (total / (1024 * 1024)).toFixed(1);
   }
 
+  /** @returns {number} Maximum number of points per batch buffer. */
   get batchCapacity() {
     return this._batchCapacity;
   }
 
+  /** @returns {number} Detected VRAM in megabytes. */
   get detectedVRAM_MB() {
     return this._detectedVRAM_MB;
   }
 
+  /** @returns {number} Suggested LRU cache byte budget (60 % of detected VRAM). */
   get suggestedLRUBudget() {
     return this._suggestedLRUBudget;
   }
 
+  /**
+   * Return a simple benchmark object with the last frame's total milliseconds.
+   * @returns {{frameMs: number}}
+   */
   getBench() {
     return { frameMs: this._benchFrameMs };
   }
 
+  /**
+   * Return the detailed per-frame profiling breakdown.
+   * @returns {{selectMs:number, rebuildMs:number, cpuMs:number, pointMs:number, lightMs:number, totalMs:number}}
+   */
   getProfile() {
     return this._profile || { selectMs: 0, rebuildMs: 0, cpuMs: 0, pointMs: 0, lightMs: 0, totalMs: 0 };
   }
 
+  /**
+   * Create a VAO that binds the per-cloud VBOs to the point-shader attributes.
+   * If intensity, classification, or opacity buffers are not present on the
+   * cloud, the corresponding attribute is disabled and a constant value is used.
+   * @param {object} cloud - Point cloud object.
+   * @param {WebGLBuffer|null} [indexBuffer=null] - Optional element array buffer.
+   * @returns {WebGLVertexArrayObject}
+   */
   _createCloudVAO(cloud, indexBuffer = null) {
     const gl = this.gl;
     const vao = this._requireResource(gl.createVertexArray(), 'cloud VAO');
@@ -805,8 +1078,11 @@ export class Renderer {
     return vao;
   }
 
-
-
+  /**
+   * Upload index data into the dynamic element array buffer, growing it if necessary.
+   * @param {Uint32Array} buf - Index array.
+   * @param {number} count - Number of indices.
+   */
   _uploadDynamicIndices(buf, count) {
     const gl = this.gl;
     const needed = count * 4;
@@ -820,6 +1096,11 @@ export class Renderer {
     gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, buf);
   }
 
+  /**
+   * Transmit camera-related uniforms to the point vertex shader.
+   * @param {object} camera - Camera object with `.getUniforms()` method.
+   * @param {object} cloud  - Point cloud object (used for range uniforms).
+   */
   _applyCameraUniforms(camera, cloud) {
     const u = camera.getUniforms(this.width, this.height, cloud);
 
@@ -859,6 +1140,11 @@ export class Renderer {
     }
   }
 
+  /**
+   * Transmit camera-related uniforms to the depth shader.
+   * @param {object} camera
+   * @param {object} cloud
+   */
   _applyDepthUniforms(camera, cloud) {
     const u = camera.getUniforms(this.width, this.height, cloud);
     const apply = this._depthUniforms;
@@ -880,6 +1166,35 @@ export class Renderer {
     }
   }
 
+  /**
+   * Main render entry point. Executes:
+   *   1. Point splatting pass into the G-buffer (FBO).
+   *   2. Full-screen lighting pass (default framebuffer).
+   *
+   * Supports three draw paths:
+   *   - Batch-mode (multiple octree nodes sharing one big buffer).
+   *   - Indexed dynamic draw (single cloud with octree LOD selection).
+   *   - Full-cloud drawArrays (no octree, single VAO).
+   *
+   * @param {object} camera - Camera object providing uniforms and draw call.
+   * @param {object} cloud  - Point cloud object (may have octree geometry).
+   * @param {object} [opts={}] - Render options.
+   * @param {string} [opts.colorMode='rgb'] - Colour mapping mode.
+   * @param {number[]} [opts.lightDir] - Light direction in eye space.
+   * @param {number} [opts.ambient] - Ambient light contribution.
+   * @param {boolean} [opts.shading=true] - Enable diffuse shading.
+   * @param {number} [opts.pointSize] - Point size in pixels.
+   * @param {number} [opts.pointSizeType] - 0 = fixed, 1 = density-aware.
+   * @param {number} [opts.sketchfabOpacity] - Sketchfab-style opacity.
+   * @param {number} [opts.dreamy] - Dreamy glow intensity.
+   * @param {boolean} [opts.useCloudTransform] - Apply cloud rotation/scale.
+   * @param {number[]} [opts.cloudRot] - Cloud rotation [rx, ry, rz].
+   * @param {number[]} [opts.cloudScale] - Cloud scale [sx, sy, sz].
+   * @param {boolean} [opts.skyEnabled] - Enable sky colour background.
+   * @param {number[]} [opts.skyColorTop] - Top sky colour.
+   * @param {number[]} [opts.skyColorBottom] - Bottom sky colour.
+   * @returns {number} Number of points drawn (0 if context lost).
+   */
   render(camera, cloud, opts = {}) {
     if (this._contextLost) return 0;
     const t0 = performance.now();
@@ -912,6 +1227,8 @@ export class Renderer {
     const dreamy = opts.dreamy != null ? opts.dreamy : 0;
 
     let rebuildMs = 0;
+
+    // ---- Pass 1: Point splatting ----
     if (hasPoints) {
       gl.useProgram(this.progPoint);
 
@@ -937,7 +1254,7 @@ export class Renderer {
       gl.depthFunc(gl.LEQUAL);
       gl.depthMask(true);
       gl.colorMask(true, true, true, true);
-      
+
       if (sketchfabOpacity > 0 || dreamy > 0) {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -945,6 +1262,7 @@ export class Renderer {
         gl.disable(gl.BLEND);
       }
 
+      // Branch 1: Octree-node batch draw.
       if (nodes && this._batchVao) {
         const camPos = camera.getWorldPosition ? camera.getWorldPosition() : null;
         if (!this._isBatchIndexCurrent(nodes)) {
@@ -963,6 +1281,7 @@ export class Renderer {
             }
           }
         }
+      // Branch 2: Indexed per-cloud LOD draw.
       } else if (hasIndices) {
         if (!this._dynamicIndexVao) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -971,6 +1290,7 @@ export class Renderer {
         gl.bindVertexArray(this._dynamicIndexVao);
         this._uploadDynamicIndices(drawCall.indices, drawCount);
         gl.drawElements(gl.POINTS, drawCount, gl.UNSIGNED_INT, 0);
+      // Branch 3: Full-cloud unfiltered draw.
       } else {
         if (!this._cloudVao) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -982,6 +1302,7 @@ export class Renderer {
     }
     const t2 = performance.now();
 
+    // ---- Pass 2: Full-screen lighting ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
     gl.disable(gl.DEPTH_TEST);
@@ -1000,7 +1321,7 @@ export class Renderer {
     this._lightUniforms.uniform3fv(this.uLight.lightDir, 'light.lightDir', lightDir);
     this._lightUniforms.uniform1f(this.uLight.ambient, 'light.ambient', ambient);
     this._lightUniforms.uniform1i(this.uLight.shading, 'light.shading', shading ? 1 : 0);
-    
+
     const skyEnabled = opts.skyEnabled ? 1 : 0;
     const skyColorTop = opts.skyColorTop || [0.4, 0.6, 0.9];
     const skyColorBottom = opts.skyColorBottom || [0.7, 0.85, 1.0];

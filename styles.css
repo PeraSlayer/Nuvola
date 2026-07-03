@@ -1,20 +1,38 @@
+/*
+ * Nuvola — Main Stylesheet
+ * ========================
+ * Apple-inspired design system for the point cloud viewer.
+ * Uses CSS custom properties for theming and a clean,
+ * glass-morphism aesthetic with backdrop blur effects.
+ *
+ * Key sections:
+ *   - Root variables: color palette, shadows, spacing
+ *   - Global reset & typography
+ *   - Sidebar layout
+ *   - UI components: buttons, inputs, panels, sliders
+ *   - Overlays: drop overlay, HUD, minimap, loading spinner
+ *   - Responsive breakpoints for mobile
+ */
+
+/* ====== CSS Custom Properties (Design Tokens) ====== */
 :root {
-  --bg: #0a0a0a;
-  --surface: #ffffff;
-  --surface2: #f7f7f7;
-  --border: rgba(0, 0, 0, 0.06);
-  --text: #1d1d1f;
-  --muted: #86868b;
-  --accent: #0071e3;
-  --accent2: #34c759;
-  --danger: #ff3b30;
-  --radius: 12px;
-  --sidebar-w: 260px;
+  --bg: #0a0a0a;                    /* Dark viewport background */
+  --surface: #ffffff;               /* Sidebar and panel background */
+  --surface2: #f7f7f7;              /* Secondary surface for buttons/inputs */
+  --border: rgba(0, 0, 0, 0.06);    /* Subtle border color */
+  --text: #1d1d1f;                  /* Primary text color (Apple-like dark gray) */
+  --muted: #86868b;                 /* Secondary/muted text */
+  --accent: #0071e3;                /* Primary accent (Apple blue) */
+  --accent2: #34c759;               /* Secondary accent (green) */
+  --danger: #ff3b30;                /* Danger/error color (red) */
+  --radius: 12px;                   /* Standard border radius */
+  --sidebar-w: 260px;               /* Sidebar width */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
+/* ====== Global Reset & Box-Sizing ====== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -26,8 +44,13 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ====== App Layout: Flexbox Container ====== */
 #app { display: flex; height: 100%; width: 100%; }
 
+/* ====== Sidebar: Controls Panel ======
+   Fixed-width left panel with glass-style background,
+   scrollable when content exceeds viewport height, and
+   a slide-in animation for mobile. */
 #sidebar {
   width: var(--sidebar-w); min-width: var(--sidebar-w);
   background: var(--surface);
@@ -38,26 +61,32 @@ html, body {
   box-shadow: var(--shadow-md);
 }
 
+/* Sidebar scrollbar styling */
 #sidebar::-webkit-scrollbar { width: 8px; }
 #sidebar::-webkit-scrollbar-track { background: transparent; }
 #sidebar::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.1); border-radius: 4px; }
 #sidebar::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.15); }
 
+/* Sidebar title */
 #sidebar h1 {
   font-size: 18px; font-weight: 600; padding: 20px 24px 18px;
   border-bottom: 1px solid var(--border);
   color: var(--text); letter-spacing: -0.02em;
   line-height: 1.3;
 }
+/* Subtitle below app name */
 #sidebar h1 span {
   display: block; font-size: 12px; color: var(--muted);
   font-weight: 400; margin-top: 4px;
   letter-spacing: 0;
 }
 
+/* ====== Main Viewport ====== */
 #main { flex: 1; position: relative; overflow: hidden; }
+/* WebGL canvas fills the main area completely */
 #glcanvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
+/* ====== Panel: Grouped Control Sections ====== */
 .panel { padding: 16px 20px; }
 .panel + .panel { border-top: 1px solid var(--border); }
 .panel h2 {
@@ -67,12 +96,16 @@ html, body {
   font-weight: 500;
 }
 
+/* ====== Labels & Form Elements ====== */
 label {
   display: flex; align-items: center; gap: 10px;
   font-size: 14px; color: var(--text);
   cursor: pointer;
 }
 
+/* ====== Range Sliders ======
+   Custom-styled range inputs with blue accent thumb
+   and a smooth hover scale effect. */
 input[type="range"] {
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 6px;
@@ -104,15 +137,20 @@ input[type="range"]::-moz-range-thumb {
   box-shadow: 0 2px 6px rgba(0, 113, 227, 0.3);
 }
 
+/* ====== Layout Utilities: Row & Value Display ====== */
 .row { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
 .row label { margin: 0; flex: 1; font-size: 14px; }
 .row span.val {
   min-width: 44px; text-align: right;
   font-size: 13px; color: var(--accent);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums;  /* keeps numbers aligned */
   font-weight: 500;
 }
 
+/* ====== Buttons ======
+   Clean, flat buttons with subtle elevation.
+   .primary buttons use the accent blue, .active indicates
+   the currently selected state. */
 button, .btn {
   background: var(--surface2); border: none;
   color: var(--text); padding: 9px 14px; border-radius: var(--radius);
@@ -146,21 +184,26 @@ button.primary:hover {
   box-shadow: 0 4px 12px rgba(0, 113, 227, 0.4);
 }
 
+/* ====== Button Layouts: Grid, View Snap, Pill Groups ====== */
 .btn-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 
 .view-snap { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 .view-snap .snap-btn { font-size: 13px; padding: 8px 12px; text-align: center; }
 
+/* ====== Status Text & Info ====== */
 .stat {
   font-size: 13px; color: var(--muted);
   line-height: 1.6; font-variant-numeric: tabular-nums;
 }
 .stat b { color: var(--text); font-weight: 500; }
 
+/* Hidden file input (triggered via button) */
 input[type="file"] { display: none; }
+/* Color mode toggle buttons */
 .mode-btns { display: flex; flex-wrap: wrap; gap: 8px; }
 .mode-btns button { flex: 1 1 45%; }
 
+/* ====== Utility Classes ====== */
 .full { width: 100%; }
 .flex-1 { flex: 1; }
 .mt-1 { margin-top: 10px; }
@@ -170,6 +213,7 @@ input[type="file"] { display: none; }
 .hint { font-size: 12px; color: var(--accent2); margin-top: 6px; line-height: 1.4; }
 .small { font-size: 13px; }
 
+/* ====== Select Dropdowns ====== */
 select {
   width: 100%; background: var(--surface2);
   border: none; color: var(--text);
@@ -181,6 +225,7 @@ select {
 }
 select:hover { background: #ebebeb; }
 
+/* ====== Color Input (Color Picker) ====== */
 input[type="color"] {
   -webkit-appearance: none;
   border: none;
@@ -200,6 +245,9 @@ input[type="color"]::-webkit-color-swatch {
   border-radius: 8px;
 }
 
+/* ====== Drag-and-Drop Overlay ======
+   Shown when files are dragged over the viewport.
+   Uses a frosted-glass background with a dashed border. */
 #drop-overlay {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -215,6 +263,8 @@ input[type="color"]::-webkit-color-swatch {
 #drop-overlay p { color: rgba(255, 255, 255, 0.9); font-size: 16px; text-align: center; font-weight: 400; }
 #drop-overlay p strong { color: white; display: block; font-size: 20px; margin-bottom: 10px; font-weight: 500; }
 
+/* ====== HUD (Heads-Up Display) ======
+   Top-left overlay showing point counts and performance info. */
 #hud {
   position: absolute; top: 16px; left: 16px;
   background: rgba(255, 255, 255, 0.78);
@@ -229,6 +279,8 @@ input[type="color"]::-webkit-color-swatch {
 }
 #hud b { color: var(--text); font-weight: 500; }
 
+/* ====== Minimap ======
+   Bottom-right canvas showing a top-down bird's-eye view. */
 #minimap {
   position: absolute; bottom: 16px; right: 16px;
   width: 140px; height: 140px;
@@ -241,6 +293,8 @@ input[type="color"]::-webkit-color-swatch {
 }
 #minimap canvas { width: 100%; height: 100%; display: block; }
 
+/* ====== Measurement Info Overlay ======
+   Bottom-left panel showing distance measurement results. */
 #measure-info {
   position: absolute; bottom: 16px; left: 16px;
   background: rgba(255, 255, 255, 0.78);
@@ -254,6 +308,8 @@ input[type="color"]::-webkit-color-swatch {
 #measure-info.visible { display: block; }
 #measure-info .title { color: var(--accent); font-weight: 500; margin-bottom: 6px; }
 
+/* ====== Loading Spinner ======
+   Fullscreen overlay with animated spinner during data loading. */
 #loading {
   position: absolute; inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -271,6 +327,8 @@ input[type="color"]::-webkit-color-swatch {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ====== Sidebar Toggle Button (Mobile) ======
+   Hidden on desktop, visible as a hamburger button on small screens. */
 #toggle-sidebar {
   display: none; position: absolute; top: 16px; right: 16px;
   z-index: 15;
@@ -284,14 +342,16 @@ input[type="color"]::-webkit-color-swatch {
   box-shadow: var(--shadow-lg);
 }
 
+/* ====== Responsive: Mobile (< 768px) ======
+   Sidebar slides in/out from the left, toggle button becomes visible. */
 @media (max-width: 768px) {
   :root { --sidebar-w: 260px; }
   #sidebar {
     position: absolute; height: 100%;
-    transform: translateX(-100%);
+    transform: translateX(-100%);       /* hidden off-screen to the left */
     box-shadow: var(--shadow-lg);
   }
-  #sidebar.open { transform: translateX(0); }
+  #sidebar.open { transform: translateX(0); }  /* slide in */
   #toggle-sidebar { display: block; }
   #minimap { width: 110px; height: 110px; }
 }

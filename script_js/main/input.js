@@ -1,3 +1,28 @@
+/**
+ * @file input.js
+ * @description Input handling module for the Nuvola point cloud viewer.
+ *
+ * Binds all user input events (mouse, keyboard, touch) to the App instance.
+ * Supports orbit camera controls (rotate, zoom, pan), first-person (FPS)
+ * controls passthrough, gizmo interaction (translate/rotate/scale handles),
+ * measurement point picking, and WebRTC streaming remote control signals.
+ *
+ * Keyboard shortcuts:
+ *   Arrow keys / WASD  - pan the camera
+ *   Q / E              - rotate view left/right by one step
+ *   +/-                - zoom in/out
+ *   R                  - reset camera to default view
+ *   G                  - toggle gizmo mode (translate / rotate / scale / off)
+ *   C                  - switch camera mode (orbit / FPS)
+ *   Double-click       - reset view and fit to cloud bounds
+ *
+ * Touch gestures:
+ *   Single touch drag  - orbital rotation
+ *   Pinch gesture      - zoom in/out centered on the pinch midpoint
+ *
+ * @module input
+ */
+
 const ROTATION_SENSITIVITY = 0.003;
 const VERTICAL_ROTATION_SENSITIVITY = 0.15;
 const ZOOM_FACTOR_IN = 1.15;
@@ -7,11 +32,18 @@ const KEYBOARD_PAN_SPEED = 20;
 /**
  * Binds all input events (mouse, keyboard, touch) to the App instance.
  * Uses AbortController signal for clean teardown.
+ *
+ * @param {App} app - The main application instance
  */
 export function bindInput(app) {
   const c = app.canvas;
   const signal = app._abortController.signal;
 
+  /**
+   * mouseDown handler: initiates drag for orbit/gizmo interaction.
+   * Skips if in FPS mode or when measurement tool is active.
+   * Performs gizmo hit test on left click when gizmo is enabled.
+   */
   c.addEventListener('mousedown', (e) => {
     if (app.camera.activeMode === 'fps') return;
     if (app.measurement.active && e.button === 0) return;
@@ -32,15 +64,29 @@ export function bindInput(app) {
     app._dragButton = e.button;
   }, { signal });
 
+  /**
+   * Global mouseMove handler on window to detect when mouse button
+   * is released outside the canvas (e.which === 0 means no button pressed).
+   */
   window.addEventListener('mousemove', (e) => {
     if (app._dragging && e.which === 0) app._dragging = false;
   }, { signal });
 
+  /**
+   * Global mouseUp handler: ends gizmo drag and stops camera drag
+   * when the initiating button is released.
+   */
   window.addEventListener('mouseup', (e) => {
     if (app.gizmo.isActive()) app.gizmo.endDrag();
     if (e.button === app._dragButton) app._dragging = false;
   }, { signal });
 
+  /**
+   * Canvas mouseMove handler: handles gizmo dragging, gizmo hover,
+   * and camera orbit/pan while dragging.
+   * Right button (button 2) pans the camera in the object's local frame.
+   * Other buttons rotate the camera via horizontal and vertical increments.
+   */
   c.addEventListener('mousemove', (e) => {
     if (app.camera.activeMode === 'fps') return;
     const rect = c.getBoundingClientRect();
@@ -77,8 +123,16 @@ export function bindInput(app) {
     }
   }, { signal });
 
+  /**
+   * Prevents the default context menu from appearing on right-click
+   * over the canvas.
+   */
   c.addEventListener('contextmenu', (e) => e.preventDefault(), { signal });
 
+  /**
+   * Wheel handler: zooms the camera in/out centered on the mouse position.
+   * Updates the zoom slider in the UI.
+   */
   c.addEventListener('wheel', (e) => {
     if (app.camera.activeMode === 'fps') return;
     e.preventDefault();
@@ -92,6 +146,10 @@ export function bindInput(app) {
     document.getElementById('zoom-val').textContent = app.camera.zoom.toFixed(1);
   }, { passive: false, signal });
 
+  /**
+   * Double-click handler: resets the camera and fits the view
+   * to the point cloud bounding box.
+   */
   c.addEventListener('dblclick', (e) => {
     e.preventDefault();
     app.camera.reset();
@@ -100,6 +158,12 @@ export function bindInput(app) {
     document.getElementById('zoom-val').textContent = app.camera.zoom.toFixed(1);
   }, { signal });
 
+  /**
+   * Keyboard handler: supports arrow keys / WASD for panning in orbit mode,
+   * Q/E for rotating the view by one cardinal step, +/- for zoom,
+   * R for resetting the view, G for toggling the gizmo mode,
+   * and C for switching between orbit and FPS camera modes.
+   */
   window.addEventListener('keydown', (e) => {
     if (!app.cloud) return;
 
@@ -184,6 +248,11 @@ export function bindInput(app) {
   }, { signal });
 
   let lastTouchDist = 0;
+
+  /**
+   * Touchstart handler: supports single-touch drag (orbit or gizmo interaction)
+   * and two-touch pinch gesture tracking by recording the initial distance.
+   */
   c.addEventListener('touchstart', (e) => {
     if (app.camera.activeMode === 'fps') return;
     if (e.touches.length === 1) {
@@ -209,6 +278,10 @@ export function bindInput(app) {
     }
   }, { passive: true, signal });
 
+  /**
+   * Touchmove handler: handles single-touch drag for camera orbit
+   * and two-touch pinch zoom centered on the pinch midpoint.
+   */
   c.addEventListener('touchmove', (e) => {
     if (app.camera.activeMode === 'fps') return;
     const rect = c.getBoundingClientRect();
@@ -243,11 +316,19 @@ export function bindInput(app) {
     }
   }, { passive: true, signal });
 
+  /**
+   * Touchend handler: ends gizmo drag and orbit drag state
+   * when all touches are released.
+   */
   c.addEventListener('touchend', () => {
     if (app.gizmo.isActive()) app.gizmo.endDrag();
     app._dragging = false;
   }, { signal });
 
+  /**
+   * Click handler: when the measurement tool is active, picks a point
+   * on the point cloud surface via the pick grid for distance measurement.
+   */
   c.addEventListener('click', (e) => {
     if (app.camera.activeMode === 'fps') return;
     if (!app.measurement.active || !app.cloud) return;
@@ -261,5 +342,9 @@ export function bindInput(app) {
     }
   }, { signal });
 
+  /**
+   * Window resize handler: calls the app's resize method to update
+   * canvas dimensions, renderer viewport, and camera projection.
+   */
   window.addEventListener('resize', () => app._resize(), { signal });
 }

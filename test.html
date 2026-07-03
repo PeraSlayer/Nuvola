@@ -1,9 +1,20 @@
+<!--
+Nuvola Test Suite (Phases 1–5)
+================================
+Self-contained automated testing page for the Nuvola point cloud engine.
+Covers: Potree streaming, LOD selection, LRU cache, GPU VAO uploads,
+point size rendering, classification coloring, and FPS/isometric camera modes.
+
+Layout is a two-column grid with controls on the left and a diagnostic
+log panel spanning the full width at the bottom.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Nuvola — Test Suite (Phase 1–5)</title>
+  <!-- Import map for Three.js module resolution -->
   <script type="importmap">
   {
     "imports": {
@@ -12,6 +23,7 @@
   }
   </script>
   <style>
+    /* ====== Test Suite Design Tokens (Dark Theme) ====== */
     :root {
       --bg: #0d1117;
       --surface: #161b22;
@@ -26,6 +38,8 @@
       --radius: 6px;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ====== Body & Typography ====== */
     body {
       font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
       background: var(--bg);
@@ -37,8 +51,10 @@
     h1 span { color: var(--blue); }
     .subtitle { color: var(--text2); font-size: 0.75rem; margin-bottom: 20px; }
 
+    /* ====== Layout Grid ====== */
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
+    /* ====== Panels ====== */
     .panel {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -53,6 +69,7 @@
     }
     .panel.full { grid-column: 1 / -1; }
 
+    /* ====== Row Layout ====== */
     .row {
       display: flex;
       align-items: center;
@@ -64,6 +81,7 @@
     .row input[type="range"] { flex: 1; accent-color: var(--blue); }
     .val { color: var(--blue); min-width: 40px; text-align: right; }
 
+    /* ====== Buttons ====== */
     button {
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -80,6 +98,7 @@
     button.active { background: var(--blue); border-color: var(--blue); color: #000; font-weight: bold; }
     .mode-btns { display: flex; flex-wrap: wrap; gap: 4px; }
 
+    /* ====== Text Input & Select ====== */
     input[type="text"] {
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -90,7 +109,18 @@
       flex: 1;
       font-family: inherit;
     }
+    select {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 4px 8px;
+      font-size: 0.78rem;
+      font-family: inherit;
+    }
 
+    /* ====== Log Panel ======
+       Monospace scrollable area for test output with color-coded messages. */
     #log {
       background: var(--bg);
       border: 1px solid var(--border);
@@ -109,16 +139,7 @@
     .log-info { color: var(--blue); }
     .log-dim  { color: var(--text2); }
 
-    select {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: var(--radius);
-      padding: 4px 8px;
-      font-size: 0.78rem;
-      font-family: inherit;
-    }
-
+    /* ====== Test Canvas ====== */
     canvas { display: block; border: 1px solid var(--border); border-radius: var(--radius); background: #000; }
   </style>
 </head>
@@ -127,8 +148,10 @@
 <h1>Nuvola <span>Test Suite</span></h1>
 <div class="subtitle">Self-contained · Phases 01–05 · Potree streaming, LOD, per-node VAOs, point size, classification, FPS camera</div>
 
+<!-- ====== Two-Column Grid of Test Panels ====== -->
 <div class="grid">
 
+  <!-- Canvas Panel: WebGL test viewport -->
   <div class="panel">
     <h2>Canvas</h2>
     <canvas id="test-canvas" width="640" height="360"></canvas>
@@ -138,6 +161,7 @@
     </div>
   </div>
 
+  <!-- Load Dataset Panel: Potree URL input + load/reset -->
   <div class="panel">
     <h2>Load Dataset</h2>
     <div class="row">
@@ -150,6 +174,7 @@
     <div class="row"><span id="file-info" style="font-size:0.72rem;color:var(--text2)">No dataset loaded</span></div>
   </div>
 
+  <!-- LOD & Budget Panel: point budget slider, visible points, LOD check -->
   <div class="panel">
     <h2>LOD & Budget</h2>
     <div class="row">
@@ -166,6 +191,7 @@
     </div>
   </div>
 
+  <!-- Streaming + LRU Panel: loading status, cache metrics, forced eviction -->
   <div class="panel">
     <h2>Streaming + LRU</h2>
     <div class="row"><label>Loading</label><span id="nodes-loading">—</span></div>
@@ -174,6 +200,7 @@
     <div class="row"><button id="btn-free-memory">Force Eviction</button></div>
   </div>
 
+  <!-- Color Mode Panel: toggles for rendering color modes -->
   <div class="panel">
     <h2>Color Mode</h2>
     <div class="mode-btns" id="test-mode-btns">
@@ -185,6 +212,7 @@
     </div>
   </div>
 
+  <!-- Point Size Panel: auto/fixed type and size slider -->
   <div class="panel">
     <h2>Point Size</h2>
     <div class="row">
@@ -198,6 +226,7 @@
     </div>
   </div>
 
+  <!-- Test Log Panel (full width): contains run + clear buttons and scrollable log -->
   <div class="panel full">
     <h2>Test Log</h2>
     <div style="margin-bottom:6px">
@@ -209,8 +238,22 @@
 
 </div>
 
+<!-- ====== Inline Test Harness Module ====== -->
 <script type="module">
-const V = Date.now();
+/**
+ * Nuvola Test Suite — Inline Harness
+ * ===================================
+ * Dynamically imports all engine modules, sets up a minimal
+ * rendering environment, wires UI controls, runs automated
+ * Phase 1–5 tests, and provides interactive camera controls.
+ */
+
+const V = Date.now();  // Cache-busting version string
+
+/**
+ * Dynamically import engine modules with cache busting.
+ * Catches and displays any module load errors in the log panel.
+ */
 let Renderer, CameraController, PointCloud, PotreeLoader, LRUCache, VisibilitySystem, THREE;
 try {
   ({ Renderer } = await import(`./script_js/rendering-app/renderer.js?v=${V}`));
@@ -226,19 +269,48 @@ try {
   throw e;
 }
 
+/**
+ * DOM helper: querySelector by ID shorthand.
+ * @param {string} id - Element ID
+ * @returns {HTMLElement}
+ */
 const $ = id => document.getElementById(id);
 const log = $('log');
+
+/**
+ * Log a message to the test log panel with a given CSS class.
+ * @param {string} msg - Message text
+ * @param {string} [cls='log-info'] - CSS class for styling
+ */
 const p = (msg, cls = 'log-info') => { log.innerHTML += `<span class="${cls}">${msg}</span>\n`; log.scrollTop = log.scrollHeight; };
 const PASS = m => p(`  PASS  ${m}`, 'log-pass');
 const FAIL = m => p(`  FAIL  ${m}`, 'log-fail');
 const WARN = m => p(`  WARN  ${m}`, 'log-warn');
 const INFO = m => p(`• ${m}`, 'log-info');
+
+/**
+ * Assert a condition, logging PASS or FAIL.
+ * @param {boolean} c - Condition to check
+ * @param {string} m - Description
+ * @returns {boolean} Whether the assertion passed
+ */
 function assert(c, m) { if (c) PASS(m); else FAIL(m); return c; }
+
+/**
+ * Assert strict equality, logging PASS with the value or FAIL with expected/got.
+ * @param {*} a - Actual value
+ * @param {*} b - Expected value
+ * @param {string} m - Description
+ * @returns {boolean} Whether the assertion passed
+ */
 function assertEq(a, b, m) { const ok = a === b; if (ok) PASS(m + ` (${a})`); else FAIL(m + `: expected ${b}, got ${a}`); return ok; }
 
-// --- Minimal test env ---
+// ====== Minimal Test Environment State ======
 let renderer, camera, cloud = null, colorMode = 'rgb', pointSize = 3, pointSizeType = 1;
 
+/**
+ * Initialize the renderer and camera controller for the test environment.
+ */
 function init() {
   const canvas = $('test-canvas');
   renderer = new Renderer(canvas);
@@ -251,6 +323,10 @@ function init() {
   $('canvas-info').textContent = `${renderer.width}×${renderer.height} WebGL2`;
 }
 
+/**
+ * Render the current cloud state through the renderer.
+ * @returns {number} Number of points drawn (or 0 if no renderer)
+ */
 function render() {
   if (!renderer) return 0;
   return renderer.render(camera, cloud, {
@@ -263,7 +339,12 @@ function render() {
   });
 }
 
-// --- Wire UI ---
+// ====== Wire UI Event Handlers ======
+
+/**
+ * Load button: fetches a Potree metadata.json, creates a PointCloud,
+ * fits the camera to bounds, and validates the hierarchy.
+ */
 $('btn-load').onclick = async () => {
   const url = $('test-url').value.trim();
   INFO(`Loading: ${url}`);
@@ -304,6 +385,7 @@ $('btn-load').onclick = async () => {
   }
 };
 
+/** Reset button: disposes the current point cloud and clears the renderer. */
 $('btn-reset').onclick = () => {
   if (cloud) { cloud.dispose(); cloud = null; }
   render();
@@ -311,11 +393,13 @@ $('btn-reset').onclick = () => {
   INFO('Cloud disposed');
 };
 
+/** Point budget slider: updates the live display and the cloud's LOD budget. */
 $('test-budget').oninput = e => {
   $('test-budget-val').textContent = (+e.target.value / 1e6).toFixed(1) + 'M';
   if (cloud) { cloud.pointBudget = +e.target.value; camera.markDirty(); render(); }
 };
 
+/** LOD check button: queries the draw call and logs visible/node counts. */
 $('btn-lod-check').onclick = () => {
   if (!cloud) { FAIL('Load dataset first'); return; }
   const dc = cloud.getDrawCall(camera, renderer.width, renderer.height);
@@ -325,6 +409,7 @@ $('btn-lod-check').onclick = () => {
   $('vis-points').textContent = dc.count.toLocaleString();
 };
 
+/** Force eviction button: calls freeMemory on the LRU cache and logs the change. */
 $('btn-free-memory').onclick = () => {
   if (!cloud || !cloud.lru) { FAIL('No LRU'); return; }
   const before = cloud.lru.items.size;
@@ -332,7 +417,10 @@ $('btn-free-memory').onclick = () => {
   INFO(`LRU: ${before} → ${cloud.lru.items.size} items`);
 };
 
+/** Point size type dropdown: auto (zoom-based) vs fixed size. */
 $('test-ptype').onchange = e => { pointSizeType = +e.target.value; camera.markDirty(); render(); };
+
+/** Point size slider: updates value display and triggers re-render. */
 $('test-psize').oninput = e => {
   pointSize = +e.target.value;
   $('test-psize-val').textContent = pointSize.toFixed(1);
@@ -340,6 +428,7 @@ $('test-psize').oninput = e => {
   render();
 };
 
+/** Color mode buttons: set active class and switch rendering color mode. */
 document.querySelectorAll('#test-mode-btns button').forEach(btn => {
   btn.onclick = () => {
     colorMode = btn.dataset.mode;
@@ -350,8 +439,13 @@ document.querySelectorAll('#test-mode-btns button').forEach(btn => {
   };
 });
 
+/** Clear log button: empties the log panel. */
 $('btn-clear-log').onclick = () => { log.innerHTML = ''; };
 
+/**
+ * Camera mode toggle: switches between FPS (first-person) and Isometric views.
+ * Re-fits the camera to bounds after switching.
+ */
 $('btn-camera-mode').onclick = () => {
   camera.switchMode();
   const mode = camera.activeMode;
@@ -364,7 +458,8 @@ $('btn-camera-mode').onclick = () => {
   INFO(`Camera mode: ${mode}`);
 };
 
-// --- Stats polling ---
+// ====== Periodic Stats Polling ======
+// Updates the streaming/LRU status panel every 500ms.
 setInterval(() => {
   if (!cloud) return;
   if (cloud.visibilitySystem) $('nodes-loading').textContent = cloud.visibilitySystem._numNodesLoading;
@@ -374,7 +469,8 @@ setInterval(() => {
   }
 }, 500);
 
-// --- Render loop (for streaming updates) ---
+// ====== Render Loop for Streaming Updates ======
+// Continuously re-renders when the cloud signals new data has arrived.
 function renderLoop() {
   if (cloud && cloud._needsRender) {
     cloud._needsRender = false;
@@ -384,7 +480,7 @@ function renderLoop() {
 }
 requestAnimationFrame(renderLoop);
 
-// --- Automated tests ---
+// ====== Automated Test Suite (Phases 1–5) ======
 $('btn-run-all').onclick = async () => {
   log.innerHTML = '';
   INFO('═══════════════════════════════════');
@@ -392,7 +488,7 @@ $('btn-run-all').onclick = async () => {
   INFO('═══════════════════════════════════');
   INFO('');
 
-  // --- Phase 01 ---
+  // --- Phase 01: Potree Format Parser + Loader ---
   INFO('▶ Phase 01 — Potree format parser + loader');
   assertEq(!!renderer, true, 'Renderer exists');
   assertEq(!!camera, true, 'Camera exists');
@@ -408,7 +504,7 @@ $('btn-run-all').onclick = async () => {
   assert(cloud.count > 0, `Total points: ${cloud.count}`);
   INFO(`  Hierarchy: ${cloud.octreeGeometry.numNodes} nodes`);
 
-  // --- Phase 02 ---
+  // --- Phase 02: Priority Queue LOD ---
   INFO('▶ Phase 02 — Priority queue LOD');
   const vs = cloud.visibilitySystem;
   assertEq(!!vs, true, 'VisibilitySystem exists');
@@ -423,7 +519,7 @@ $('btn-run-all').onclick = async () => {
   vs.pointBudget = 1000000;
   INFO('  Budget restored to 1M');
 
-  // --- Phase 03 ---
+  // --- Phase 03: Streaming + LRU Cache ---
   INFO('▶ Phase 03 — Streaming + LRU cache');
   assertEq(!!cloud.lru, true, 'LRU cache exists');
   assertEq(typeof cloud.lru.touch, 'function', 'lru.touch()');
@@ -445,7 +541,7 @@ $('btn-run-all').onclick = async () => {
   assert(lruItems > 0, `LRU has ${lruItems} items`);
   INFO(`  LRU: ${cloud.lru.numPoints.toLocaleString()} pts / max ${cloud.lru.maxNumPoints.toLocaleString()}`);
 
-  // --- Phase 04 ---
+  // --- Phase 04: GPU Rendering Enhancements ---
   INFO('▶ Phase 04 — GPU rendering enhancements');
   assertEq(typeof renderer.uploadNode, 'function', 'uploadNode exists');
   assertEq(typeof renderer.removeNode, 'function', 'removeNode exists');
@@ -466,7 +562,7 @@ $('btn-run-all').onclick = async () => {
   const result = render();
   assert(result >= 0, `render() returned ${result}`);
 
-  // --- Phase 05 ---
+  // --- Phase 05: Camera System (FPS + Isometric) ---
   INFO('▶ Phase 05 — Camera system (FPS + Isometric)');
   assertEq(!!camera, true, 'CameraController exists');
   assertEq(camera.activeMode, 'isometric', 'Default mode is isometric');
@@ -514,7 +610,7 @@ $('btn-run-all').onclick = async () => {
   assertEq(camera._spherical.radius, 100, 'FPS reset radius');
   camera.switchMode(); // back to isometric
 
-  // --- Bug fixes ---
+  // --- Bug Fix Verification ---
   INFO('▶ Bug fix verification');
   // Bug 1+2: GPU leak — dispose should clean up
   if (dc.nodes && dc.nodes.length > 0) {
@@ -542,17 +638,19 @@ $('btn-run-all').onclick = async () => {
   INFO('  Bug fixes: #1 GPU leak, #2 dispose guard, #3 octree bounds, #4 dup glDelete, #5 transform, #6 hasColor, #10 _dragButton, #11 dead code');
 };
 
-// --- Init ---
+// ====== Initialization ======
 init();
 INFO('Test suite ready — click "Load" or "Run Automated Tests"');
 
-// --- Input handling ---
+// ====== Interactive Camera Controls ======
+// These constants control mouse/touch sensitivity for orbit and zoom.
 const _ORBIT_SENSITIVITY = 0.003;
 const _VERT_SENSITIVITY = 0.15;
 const _PAN_SPEED = 20;
 const _ZOOM_IN = 1.15;
 const _ZOOM_OUT = 0.85;
 
+// Drag state tracking for mouse and touch input
 let _dragging = false;
 let _dragButton = -1;
 let _lastMouse = [0, 0];
@@ -560,12 +658,19 @@ let _lastTouchDist = 0;
 
 const _canvas = $('test-canvas');
 
+/**
+ * Mouse down: begin drag, record starting position and button used.
+ */
 _canvas.addEventListener('mousedown', (e) => {
   _dragging = true;
   _lastMouse = [e.clientX, e.clientY];
   _dragButton = e.button;
 });
 
+/**
+ * Mouse move: orbit on left-click, pan on right-click.
+ * Uses device-pixel-ratio-aware scaling for consistent sensitivity.
+ */
 window.addEventListener('mousemove', (e) => {
   if (_dragging && e.which === 0) _dragging = false;
   if (!_dragging) return;
@@ -587,12 +692,19 @@ window.addEventListener('mousemove', (e) => {
   render();
 });
 
+/**
+ * Mouse up: end drag when the initiating button is released.
+ */
 window.addEventListener('mouseup', (e) => {
   if (e.button === _dragButton) _dragging = false;
 });
 
+/** Prevent the browser context menu from appearing on right-click over the canvas. */
 _canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+/**
+ * Mouse wheel: zoom in/out centered on the cursor position.
+ */
 _canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const rect = _canvas.getBoundingClientRect();
@@ -605,6 +717,9 @@ _canvas.addEventListener('wheel', (e) => {
   render();
 }, { passive: false });
 
+/**
+ * Double-click: reset camera and fit to bounds.
+ */
 _canvas.addEventListener('dblclick', (e) => {
   e.preventDefault();
   camera.reset();
@@ -613,6 +728,14 @@ _canvas.addEventListener('dblclick', (e) => {
   render();
 });
 
+/**
+ * Keyboard controls:
+ *   W/A/S/D or Arrow keys — pan
+ *   Q/E — rotate left/right
+ *   +/- — zoom in/out
+ *   R — reset view
+ * Ignores key events when focus is in input/textarea/select elements.
+ */
 window.addEventListener('keydown', (e) => {
   if (!cloud) return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
@@ -683,7 +806,10 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Touch: one-finger orbit, two-finger pinch-zoom
+// ====== Touch Controls ======
+/**
+ * Touch start: single finger begins orbit drag, two fingers record pinch distance.
+ */
 _canvas.addEventListener('touchstart', (e) => {
   if (e.touches.length === 1) {
     _dragging = true;
@@ -695,6 +821,9 @@ _canvas.addEventListener('touchstart', (e) => {
   }
 }, { passive: true });
 
+/**
+ * Touch move: one finger orbits, two fingers pinch-zoom and pan.
+ */
 _canvas.addEventListener('touchmove', (e) => {
   const rect = _canvas.getBoundingClientRect();
   const dpr = renderer.width / rect.width;
@@ -721,6 +850,7 @@ _canvas.addEventListener('touchmove', (e) => {
   }
 }, { passive: true });
 
+/** Touch end: reset drag state and pinch distance. */
 _canvas.addEventListener('touchend', () => {
   _dragging = false;
   _lastTouchDist = 0;

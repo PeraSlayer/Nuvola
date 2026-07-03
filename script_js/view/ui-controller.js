@@ -1,38 +1,35 @@
-/*
-===============================================================================
-File: ui-controller.js
+/**
+ * @file ui-controller.js
+ * @description Centralises the wiring between the DOM and the application
+ *   state. UIController registers event handlers for buttons, file inputs,
+ *   sliders, checkboxes, dropdowns, and navigation controls, translating
+ *   user actions into method calls on App, Camera, and Renderer.
+ *
+ *   Also handles drag-and-drop file loading, slider value display updates,
+ *   view-snap button synchronisation, colour-mode selection, point-size
+ *   controls, lighting/background parameters, measurement toggling, VR
+ *   streaming, and mobile sidebar toggle. The goal is to keep UI logic
+ *   separate from the core loading and rendering code.
+ */
 
-Questo modulo centralizza il collegamento tra DOM e stato dell'applicazione.
-UIController registra gli handler dei pulsanti, input file, slider, checkbox,
-dropdown e controlli di navigazione, traducendo le azioni dell'utente in
-chiamate sui metodi di App, Camera e Renderer.
-
-Si occupa anche di parti pratiche dell'interfaccia come drag-and-drop dei file,
-aggiornamento dei valori mostrati accanto agli slider, sincronizzazione dei
-pulsanti di vista, opzioni di colore, dimensione punti, modalita FPS e pannelli
-informativi.
-
-Il suo scopo e mantenere la logica UI separata dal nucleo di caricamento e
-rendering, cosi App puo orchestrare il sistema senza contenere direttamente
-tutti i dettagli degli eventi DOM.
-===============================================================================
-*/
-
-// =============================================================================
-// UIController
-//
-// Wires every DOM control (sidebar buttons, sliders, dropdowns) to the App's
-// state. Also handles the drag-and-drop overlay and updates the stats panel.
-// ============================================================================
-
-/** Wires DOM controls to the App state and handles drag-and-drop. */
+/**
+ * Wires every DOM control (sidebar buttons, sliders, dropdowns) to the App's
+ * state. Also handles the drag-and-drop overlay and updates the stats panel.
+ */
 export class UIController {
-  /** @param {import('./main.js').App} app */
+  /**
+   * @param {import('./main.js').App} app - The main application instance.
+   */
   constructor(app) {
     this.app = app;
     this._bind();
   }
 
+  /**
+   * Bind all DOM event listeners. Each control queries its element by id,
+   * attaches the appropriate event handler, and updates the app state.
+   * @private
+   */
   _bind() {
     const a = this.app;
     const $ = (id) => document.getElementById(id);

@@ -1,3 +1,15 @@
+/**
+ * Tiled LAS loader with IndexedDB caching and view-dependent loading.
+ *
+ * Divides large LAS files (>2GB) into spatial grid chunks, stores parsed
+ * results in IndexedDB for persistence across sessions, and loads only
+ * the chunks visible in the current viewport. Implements LRU cache
+ * eviction and supports LOD (Level of Detail) for multi-resolution
+ * rendering.
+ *
+ * @module las-tiling-loader
+ */
+
 /*
 ===============================================================================
 File: las-tiling-loader.js
@@ -23,13 +35,27 @@ const DB_NAME = 'NuvolaTilingDB';
 const DB_VERSION = 1;
 
 /**
- * Gestisce il database IndexedDB per i chunk
+ * IndexedDB-backed storage for tiled LAS chunks.
+ *
+ * Provides persistent storage of pre-parsed chunk data so that expensive
+ * parsing does not need to be repeated across page loads. Chunks are
+ * keyed by a composite ID (file hash + grid coordinates) and support
+ * LRU-based eviction via a lastAccess timestamp.
  */
 class ChunkDatabase {
+  /**
+   * Creates the database wrapper. Initialization is deferred to {@link ChunkDatabase#init}.
+   */
   constructor() {
     this.db = null;
   }
 
+  /**
+   * Opens (or creates) the IndexedDB database and ensures the 'chunks'
+   * object store and its indexes exist.
+   *
+   * @returns {Promise<void>} Resolves when the database is ready.
+   */
   async init() {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -51,6 +77,13 @@ class ChunkDatabase {
     });
   }
 
+  /**
+   * Persists a chunk object into IndexedDB. Updates the lastAccess
+   * timestamp before writing.
+   *
+   * @param {object} chunk - The chunk data object to save.
+   * @returns {Promise<void>} Resolves when the write completes.
+   */
   async saveChunk(chunk) {
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks'], 'readwrite');
@@ -62,6 +95,13 @@ class ChunkDatabase {
     });
   }
 
+  /**
+   * Retrieves a chunk by its composite ID. If found, updates its
+   * lastAccess timestamp to reflect usage.
+   *
+   * @param {string} chunkId - The chunk identifier.
+   * @returns {Promise<object|undefined>} The chunk data, or undefined if not found.
+   */
   async getChunk(chunkId) {
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks'], 'readonly');
@@ -81,6 +121,14 @@ class ChunkDatabase {
     });
   }
 
+  /**
+   * Evicts the oldest chunks from IndexedDB when the total count exceeds
+   * the specified limit. Sorts by lastAccess (ascending) and deletes the
+   * least recently used entries.
+   *
+   * @param {number} maxChunks - Maximum number of chunks to retain.
+   * @returns {Promise<number>} Number of chunks deleted.
+   */
   async cleanupOldChunks(maxChunks) {
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks'], 'readwrite');
@@ -117,9 +165,18 @@ class ChunkDatabase {
 }
 
 /**
- * Loader con sistema di tiling per file LAS grandi
+ * Loader with spatial tiling for large LAS files.
+ *
+ * Splits a LAS file into a regular grid of chunks, reads the file header
+ * to determine point count and record structure, and loads individual
+ * chunks on demand. Chunks are cached in memory and optionally persisted
+ * in IndexedDB.
  */
 export class LASTilingLoader {
+  /**
+   * Creates the tiling loader, initializing the chunk database wrapper
+   * and the underlying LASLoader.
+   */
   constructor() {
     this.db = new ChunkDatabase();
     this.dbInitialized = false;
@@ -133,7 +190,12 @@ export class LASTilingLoader {
   }
 
   /**
-   * Calcola un hash semplice del file per identificare i chunk
+   * Computes a simple hash for the file to uniquely identify chunks
+   * belonging to this file. Uses the first 1024 bytes and the file size.
+   *
+   * @param {File} file - The file to hash.
+   * @returns {Promise<string>} A string hash identifier.
+   * @private
    */
   async _computeFileHash(file) {
     const buffer = await file.slice(0, 1024).arrayBuffer();
@@ -147,7 +209,12 @@ export class LASTilingLoader {
   }
 
   /**
-   * Inizializza il database e carica i metadati del file
+   * Initializes the database and loads file metadata (header parsing via
+   * the LAS worker). Creates a grid of chunk metadata entries.
+   *
+   * @param {File} file - The LAS file to tile.
+   * @param {Function} [onProgress] - Callback receiving a 0..1 progress value.
+   * @returns {Promise<void>} Resolves when initialization is complete.
    */
   async init(file, onProgress) {
     if (!this.dbInitialized) {
@@ -214,7 +281,15 @@ export class LASTilingLoader {
   }
 
   /**
-   * Determina quali chunk sono visibili nella viewport corrente
+   * Determines which chunks are visible in the current viewport.
+   *
+   * Currently returns all chunks; future implementations may use
+   * frustum culling based on camera position and viewport dimensions.
+   *
+   * @param {object} camera - The camera object (unused, reserved for future culling).
+   * @param {number} viewportWidth - Viewport width in pixels (unused).
+   * @param {number} viewportHeight - Viewport height in pixels (unused).
+   * @returns {string[]} Array of visible chunk IDs.
    */
   getVisibleChunks(camera, viewportWidth, viewportHeight) {
     // Per ora restituisce tutti i chunk
@@ -227,7 +302,15 @@ export class LASTilingLoader {
   }
 
   /**
-   * Carica un chunk dal file originale
+   * Reads and parses a single chunk of point data directly from the
+   * original LAS file. Delegates point parsing to the LAS worker via
+   * parseRawChunk.
+   *
+   * @param {string} chunkId - The chunk identifier.
+   * @param {object} chunk - Chunk metadata (gridX, gridY, etc.).
+   * @returns {Promise<object|null>} Parsed chunk data, or null if the
+   *   chunk has no points.
+   * @private
    */
   async _loadChunkFromFile(chunkId, chunk) {
     const { gridX, gridY } = chunk;
@@ -283,7 +366,13 @@ export class LASTilingLoader {
   }
 
   /**
-   * Carica un chunk (da DB o da file)
+   * Loads a chunk, trying in-memory cache first, then IndexedDB, then
+   * falling back to reading from the original file. When loaded from
+   * file, the result is saved to both memory and IndexedDB.
+   *
+   * @param {string} chunkId - The chunk identifier.
+   * @param {Function} [onProgress] - Optional progress callback.
+   * @returns {Promise<object|null>} The loaded chunk data, or null if not found.
    */
   async loadChunk(chunkId, onProgress) {
     const chunk = this.chunks.get(chunkId);
@@ -330,7 +419,12 @@ export class LASTilingLoader {
   }
 
   /**
-   * Carica tutti i chunk visibili
+   * Loads all currently visible chunks, reporting progress as each chunk
+   * completes.
+   *
+   * @param {string[]} visibleChunkIds - Array of chunk IDs to load.
+   * @param {Function} [onProgress] - Callback receiving 0..1 progress.
+   * @returns {Promise<void>} Resolves when all visible chunks are loaded.
    */
   async loadVisibleChunks(visibleChunkIds, onProgress) {
     const total = visibleChunkIds.length;
@@ -344,14 +438,17 @@ export class LASTilingLoader {
   }
 
   /**
-   * Ottieni tutti i chunk caricati
+   * Returns all currently loaded chunks as an array.
+   *
+   * @returns {object[]} Array of loaded chunk data objects.
    */
   getLoadedChunks() {
     return Array.from(this.loadedChunks.values());
   }
 
   /**
-   * Reset dello stato
+   * Resets the loader state, clearing file reference, metadata, and
+   * all chunk caches. Does not delete IndexedDB entries.
    */
   dispose() {
     this.currentFile = null;

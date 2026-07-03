@@ -1,6 +1,25 @@
+<!--
+Nuvola Stream - PeerJS WebRTC
+===============================
+This document describes the PeerJS-based WebRTC streaming system for Nuvola.
+It enables direct peer-to-peer streaming of a WebGL-rendered point cloud
+from a MacBook host to remote clients, with bidirectional interaction via
+DataChannel for touch/mouse input relay.
+-->
+
 # Nuvola Stream - PeerJS WebRTC
 
 Sistema di streaming ottimizzato con PeerJS per WebRTC P2P diretto.
+
+<!--
+ARCHITETTURA (Architecture)
+----------------------------
+ASCII diagram showing the P2P WebRTC architecture:
+- Host (MacBook): hidden WebGL canvas -> captureStream(60) -> PeerJS
+- PeerJS Cloud: free signaling server (0peers.com)
+- Client (remote): WebRTC receive -> <video> element + DataChannel for input
+- Video stream flows directly P2P; only signaling goes through the cloud server
+-->
 
 ## Architettura
 
@@ -21,6 +40,13 @@ Host (MacBook)                    PeerJS Cloud              Client (remoto)
                     WebRTC P2P diretto (video stream)
 ```
 
+<!--
+VANTAGGI (Advantages over WebSocket)
+--------------------------------------
+Key benefits: zero server load for video, automatic NAT traversal,
+minimal latency, superior hardware codec quality, native 60fps.
+-->
+
 ## Vantaggi rispetto a WebSocket
 
 - **Zero carico sul server** per i frame video (P2P diretto)
@@ -28,6 +54,17 @@ Host (MacBook)                    PeerJS Cloud              Client (remoto)
 - **Latenza minima** (WebRTC ottimizzato per real-time)
 - **Qualità superiore** (codec hardware VP8/H264/VP9)
 - **60fps nativi** (MediaStream senza conversioni)
+
+<!--
+USO (Usage)
+-----------
+Step-by-step instructions:
+1. Start the server (npm start)
+2. Host: open stream-host.html on the MacBook, note the Peer ID
+3. Client: open stream-client.html on the remote device, enter the Peer ID
+4. Control: "Take Control" / "Release Control" for exclusive touch/mouse input
+   (only one client can control at a time)
+-->
 
 ## Uso
 
@@ -63,6 +100,17 @@ Inserisci il Peer ID dell'host e clicca "Connetti".
 - Clicca "Release Control" per rilasciare il controllo
 - Solo un client alla volta può controllare il modello
 
+<!--
+OTTIMIZZAZIONI (Optimizations)
+-------------------------------
+Host side: hidden WebGL canvas (opacity:0, position:fixed), no UI overlay
+(sidebar, panels, minimap disabled), essential point cloud rendering only,
+captureStream(60) for 60fps capture, PeerJS handles signaling and NAT.
+
+Client side: MediaStream via WebRTC, hardware decoding (VP8/H264/VP9),
+touch/mouse input over DataChannel at 30Hz.
+-->
+
 ## Ottimizzazioni
 
 ### Host (stream-host.html)
@@ -79,6 +127,18 @@ Inserisci il Peer ID dell'host e clicca "Connetti".
 - Decodifica hardware (VP8/H264/VP9)
 - Input touch/mouse inviati via DataChannel
 - Segnali a 30Hz (sufficiente per interazione fluida)
+
+<!--
+TROUBLESHOOTING
+---------------
+Common issues:
+- Connection failure: check internet access (PeerJS uses free cloud server),
+  browser console, and correct Peer ID.
+- No video: some browsers require user interaction before playing —
+  click/tap the screen.
+- Poor performance: reduce canvas resolution, disable power saving,
+  close other GPU-intensive apps.
+-->
 
 ## Troubleshooting
 
@@ -99,6 +159,13 @@ Inserisci il Peer ID dell'host e clicca "Connetti".
 - Verifica che il Mac non sia in modalità risparmio energetico
 - Chiudi altre applicazioni che usano la GPU
 
+<!--
+DIFFERENZE (Comparison: WebSocket vs PeerJS WebRTC)
+----------------------------------------------------
+Comparison table across server load, latency, video quality, NAT traversal,
+complexity, and reliability.
+-->
+
 ## Differenze rispetto a WebSocket
 
 | Aspetto | WebSocket | PeerJS WebRTC |
@@ -110,11 +177,26 @@ Inserisci il Peer ID dell'host e clicca "Connetti".
 | Complessità | Bassa | Media (PeerJS semplifica) |
 | Affidabilità | Alta (WebSocket stabile) | Media (WebRTC può fallire in reti restrittive) |
 
+<!--
+FILE MODIFICATI (Modified Files)
+---------------------------------
+List of files involved in the PeerJS streaming implementation:
+stream-host.html, stream-client.html, and server.js (kept as fallback).
+-->
+
 ## File modificati
 
 - `server/stream-host.html` - Host minimalista con PeerJS
 - `server/stream-client.html` - Client con PeerJS
 - `server/server.js` - Server WebSocket (solo per fallback, non più necessario per streaming)
+
+<!--
+NOTE
+----
+Supplemental notes: PeerJS uses 0peers.com free cloud server for signaling;
+for production, consider self-hosting PeerJS server; video traffic is P2P
+only; works on Chrome, Firefox, Safari, Edge (desktop and mobile).
+-->
 
 ## Note
 

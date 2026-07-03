@@ -1,9 +1,20 @@
+<!--
+Nuvola Stream Host
+===================
+WebRTC-based streaming host page that renders a point cloud
+off-screen and captures the canvas as a MediaStream to send
+to connected clients via PeerJS. Loads points.ply by default
+and streams at 60fps, accepting remote camera control signals
+(yaw, pitch, zoom, pan) from the client over a data channel.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>Nuvola Stream Host</title>
+  <!-- PeerJS library for WebRTC peer-to-peer connections -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- Import map for Three.js module resolution -->
   <script type="importmap">
   {
     "imports": {
@@ -12,7 +23,9 @@
   }
   </script>
   <style>
+    /* Minimal host styles: off-screen canvas + green monospace status overlay */
     body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+    /* Canvas is rendered off-screen; only its MediaStream is shared */
     #glcanvas { position: fixed; left: -9999px; opacity: 0; }
     #status {
       position: fixed;
@@ -30,10 +43,21 @@
   </style>
 </head>
 <body>
+  <!-- Off-screen canvas used for headless rendering and stream capture -->
   <canvas id="glcanvas" width="1280" height="720"></canvas>
   <div id="status">Inizializzazione...</div>
 
   <script type="module">
+    /**
+     * Nuvola Stream Host — Inline Module
+     * ===================================
+     * Imports the Nuvola engine, loads a default point cloud,
+     * initializes PeerJS with ID "1", captures the canvas
+     * as a 60fps MediaStream, and responds to incoming calls
+     * by sending the stream. Also handles control signals
+     * (camera manipulation) from the connected client.
+     */
+
     import { PLYLoader } from '../script_js/file_loader/ply-loader.js';
     import { LASLoader } from '../script_js/file_loader/las-loader.js';
     import { decompressLAZ } from '../script_js/file_loader/laz-decompressor.js';
@@ -47,13 +71,15 @@
     const canvas = document.getElementById('glcanvas');
     const statusEl = document.getElementById('status');
 
+    /** Initialize the off-screen renderer at 1280×720 resolution. */
     const renderer = new Renderer(canvas);
     renderer.resize(1280, 720);
     console.log('[Host] Canvas dimensions:', canvas.width, 'x', canvas.height);
     console.log('[Host] Renderer dimensions:', renderer.width, 'x', renderer.height);
+
     const camera = new CameraController(canvas.width, canvas.height);
     const cloudTransform = new CloudTransform();
-    
+
     let cloud = null;
     let peer = null;
     let ws = null;
@@ -63,18 +89,23 @@
     let lastTime = performance.now();
     let mediaStream = null;
 
+    /**
+     * Load the default points.ply file from the parent directory.
+     * Detects the file extension and routes to the appropriate loader.
+     * @returns {Promise<boolean>} Whether the load succeeded
+     */
     async function loadDefaultFile() {
       statusEl.textContent = 'Caricamento points.ply...';
       try {
         const response = await fetch('../points.ply');
         if (!response.ok) throw new Error('File non trovato');
-        
+
         const blob = await response.blob();
         const buf = await blob.arrayBuffer();
-        
+
         const ext = 'ply';
         let data;
-        
+
         if (ext === 'ply') {
           data = await new PLYLoader().load(buf);
         } else if (ext === 'las') {
@@ -86,16 +117,16 @@
         } else if (ext === 'e57') {
           data = await new E57Loader().load(buf);
         }
-        
+
         cloud = new PointCloud(data);
         console.log('[Host] PointCloud creata, punti:', cloud.count);
         renderer.uploadPointCloud(cloud);
         console.log('[Host] PointCloud caricata nella GPU');
         camera.fitToBounds(cloud, canvas.width, canvas.height);
         console.log('[Host] Camera fitToBounds completata');
-        
+
         statusEl.textContent = '✓ Point cloud caricato';
-        
+
         return true;
       } catch (err) {
         statusEl.textContent = '✗ Errore: ' + err.message;
@@ -105,10 +136,16 @@
       }
     }
 
+    /**
+     * Initialize PeerJS with the hardcoded peer ID "1".
+     * Listens for incoming calls and answers with the captured MediaStream.
+     * Routes control signals (yaw, pitch, zoom, pan, reset) from the client
+     * to the camera controller.
+     */
     function initPeerJS() {
       const peerId = '1';
       statusEl.textContent = 'Inizializzazione PeerJS...';
-      
+
       peer = new Peer(peerId, {
         host: window.location.hostname,
         port: 3001,
@@ -128,11 +165,15 @@
         console.log('[Host] Rispondo alla chiamata...');
         call.answer(mediaStream);
         console.log('[Host] Risposta inviata');
-        
+
         call.on('stream', (remoteStream) => {
           console.log('[Host] Stream remoto ricevuto (non dovrebbe succedere)');
         });
-        
+
+        /**
+         * Handle incoming control data from the client.
+         * Supports 'signal' (camera movement) and 'reset' (reset view).
+         */
         call.on('data', (data) => {
           console.log('[Host] Dati ricevuti dal client:', data);
           if (data.type === 'signal') {
@@ -158,11 +199,11 @@
             camera.markDirty();
           }
         });
-        
+
         call.on('close', () => {
           console.log('[Host] Client disconnesso');
         });
-        
+
         call.on('error', (err) => {
           console.error('[Host] Errore chiamata:', err);
         });
@@ -175,40 +216,51 @@
       });
     }
 
+    /**
+     * Start capturing the canvas as a 60fps MediaStream.
+     * Begins the render loop that continuously draws frames.
+     */
     function startStreaming() {
       if (streaming) return;
       streaming = true;
       console.log('[Host] Streaming avviato');
-      
+
       mediaStream = canvas.captureStream(60);
       console.log('[Host] MediaStream tracks:', mediaStream.getTracks().length);
       mediaStream.getTracks().forEach((track, i) => {
         console.log(`[Host] Track ${i}:`, track.kind, track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
       });
-      
+
       streamLoop = requestAnimationFrame(renderLoop);
     }
 
+    /**
+     * Stop streaming: cancel the render loop and stop all MediaStream tracks.
+     */
     function stopStreaming() {
       if (!streaming) return;
       streaming = false;
-      
+
       if (streamLoop) {
         cancelAnimationFrame(streamLoop);
         streamLoop = null;
       }
-      
+
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
         mediaStream = null;
       }
-      
+
       console.log('[Host] Streaming fermato');
     }
 
+    /**
+     * Main render loop: draws the point cloud each frame and logs FPS.
+     * Performs a pixel check to verify the canvas has content.
+     */
     function renderLoop() {
       if (!streaming) return;
-      
+
       renderer.render(camera, cloud, {
         colorMode: 0,
         lightDir: [0.5, 0.5, 0.7],
@@ -225,12 +277,12 @@
         skyColorTop: [0.4, 0.6, 0.9],
         skyColorBottom: [0.7, 0.85, 1.0],
       });
-      
+
       frameCount++;
       const now = performance.now();
       if (now - lastTime >= 1000) {
         console.log(`[Host] Render FPS: ${frameCount}`);
-        // Verifica che il canvas abbia contenuto
+        // Verify that the canvas has content by reading a single pixel
         const pixel = new Uint8Array(4);
         const gl = renderer.gl;
         gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
@@ -238,10 +290,11 @@
         frameCount = 0;
         lastTime = now;
       }
-      
+
       streamLoop = requestAnimationFrame(renderLoop);
     }
 
+    // ====== Bootstrap Sequence ======
     (async () => {
       const loaded = await loadDefaultFile();
       if (loaded) {

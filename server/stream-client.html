@@ -1,21 +1,40 @@
+<!--
+Nuvola Stream Client
+=====================
+WebRTC-based streaming client that connects to a Nuvola Stream Host
+via PeerJS, receives the rendered point cloud as a video stream,
+and renders it on a 2D canvas. Provides touch/mouse camera controls
+that are sent back to the host over a data channel. Features a
+connection overlay, FPS counter, control toggle, camera mode switch,
+and responsive mobile layout.
+-->
 <!DOCTYPE html>
 <html lang="it">
 <head>
   <meta charset="UTF-8">
+  <!-- Prevent pinch-zoom and scaling on mobile for touch orbit/zoom controls -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Nuvola Stream Client</title>
+  <!-- PeerJS library for WebRTC peer-to-peer connections -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
+    /* ====== Global Reset ====== */
     * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    /* ====== Body: full-screen dark background, no scroll, no touch actions ====== */
     body { background: #000; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; touch-action: none; }
-    
+
+    /* ====== Canvas: fills the viewport, receives the streamed video frames ====== */
     #canvas {
       width: 100vw;
       height: 100vh;
       display: block;
       background: #000;
     }
-    
+
+    /* ====== Connection Overlay ======
+       Full-screen overlay shown before connection is established.
+       Contains the Peer ID input and Connect button. */
     #overlay {
       position: fixed;
       top: 0; left: 0;
@@ -29,12 +48,13 @@
       z-index: 1000;
       transition: opacity 0.3s;
     }
-    
+
     #overlay.hidden { opacity: 0; pointer-events: none; }
-    
+
     .status { font-size: 28px; margin: 20px; text-align: center; font-weight: 600; }
     .info { font-size: 16px; color: #888; margin: 10px; text-align: center; max-width: 80%; }
-    
+
+    /* Peer ID text input */
     #peer-id-input {
       background: rgba(255, 255, 255, 0.1);
       border: 1px solid rgba(255, 255, 255, 0.3);
@@ -47,9 +67,11 @@
       margin: 10px;
       text-align: center;
     }
-    
+
     #peer-id-input::placeholder { color: rgba(255, 255, 255, 0.4); }
-    
+
+    /* ====== HUD: Top Bar ======
+       Contains the FPS counter (left) and control status indicator (right). */
     #hud {
       position: fixed;
       top: 0; left: 0; right: 0;
@@ -61,9 +83,10 @@
       z-index: 999;
       pointer-events: none;
     }
-    
+
     #hud > * { pointer-events: auto; }
-    
+
+    /* FPS display (top-left) */
     #fps {
       background: rgba(0, 0, 0, 0.6);
       color: #0f0;
@@ -72,7 +95,8 @@
       font-family: 'SF Mono', Monaco, monospace;
       font-size: 13px;
     }
-    
+
+    /* Control status indicator (top-right) — green when active */
     #control-status {
       background: rgba(0, 0, 0, 0.6);
       color: #888;
@@ -81,13 +105,14 @@
       font-size: 13px;
       transition: all 0.3s;
     }
-    
+
     #control-status.active {
       background: rgba(52, 199, 89, 0.3);
       color: #34c759;
       border: 1px solid rgba(52, 199, 89, 0.5);
     }
-    
+
+    /* ====== Bottom Bar: Control Buttons ====== */
     #bottom-bar {
       position: fixed;
       bottom: 0; left: 0; right: 0;
@@ -99,7 +124,9 @@
       z-index: 999;
       gap: 12px;
     }
-    
+
+    /* ====== Button Styles ======
+       Glass-morphism buttons with backdrop blur and color-coded roles. */
     .btn {
       background: rgba(255, 255, 255, 0.15);
       color: #fff;
@@ -115,38 +142,42 @@
       user-select: none;
       -webkit-user-select: none;
     }
-    
+
     .btn:active { transform: scale(0.95); background: rgba(255, 255, 255, 0.25); }
-    
+
+    /* Take/Release Control button — cyan when inactive, red when active */
     .btn-control {
       background: rgba(0, 212, 255, 0.2);
       border-color: rgba(0, 212, 255, 0.4);
       color: #00d4ff;
     }
-    
+
     .btn-control.active {
       background: rgba(255, 59, 48, 0.2);
       border-color: rgba(255, 59, 48, 0.4);
       color: #ff3b30;
     }
-    
+
+    /* Camera mode toggle — purple (Isometric) / orange (FPS) */
     .btn-mode {
       background: rgba(175, 82, 222, 0.2);
       border-color: rgba(175, 82, 222, 0.4);
       color: #af52de;
     }
-    
+
     .btn-mode.fps {
       background: rgba(255, 159, 10, 0.2);
       border-color: rgba(255, 159, 10, 0.4);
       color: #ff9f0a;
     }
-    
+
+    /* Reset View button — subtle neutral */
     .btn-reset {
       background: rgba(255, 255, 255, 0.1);
       border-color: rgba(255, 255, 255, 0.15);
     }
-    
+
+    /* ====== Responsive: smaller buttons on mobile ====== */
     @media (max-width: 768px) {
       .btn { padding: 10px 18px; font-size: 14px; }
       #fps, #control-status { font-size: 12px; padding: 5px 10px; }
@@ -154,20 +185,24 @@
   </style>
 </head>
 <body>
+  <!-- 2D canvas where the streamed video frames are drawn -->
   <canvas id="canvas"></canvas>
-  
+
+  <!-- Connection overlay: shown until the stream starts playing -->
   <div id="overlay">
     <div class="status">Nuvola Stream</div>
     <div class="info" id="overlay-info">Inserisci il Peer ID dell'host</div>
     <input type="text" id="peer-id-input" placeholder="1" />
     <button class="btn" id="btn-connect">Connetti</button>
   </div>
-  
+
+  <!-- Top HUD bar -->
   <div id="hud">
     <div id="fps">FPS: --</div>
     <div id="control-status">No control</div>
   </div>
-  
+
+  <!-- Bottom control bar -->
   <div id="bottom-bar">
     <button class="btn btn-control" id="btn-control">Take Control</button>
     <button class="btn btn-mode" id="btn-mode">Mode: Isometric</button>
@@ -175,14 +210,25 @@
   </div>
 
   <script>
+    /**
+     * Nuvola Stream Client — Inline Script
+     * =====================================
+     * Connects to a Nuvola Stream Host via PeerJS, receives the
+     * rendered point cloud as a video stream, draws it on a 2D
+     * canvas, and sends touch/mouse camera control signals back
+     * to the host over a WebRTC data channel.
+     */
+
+    // ====== DOM References ======
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
+    /** Hidden video element that receives the WebRTC stream. */
     const video = document.createElement('video');
     video.autoplay = true;
     video.playsInline = true;
     video.style.display = 'none';
     document.body.appendChild(video);
-    
+
     const overlay = document.getElementById('overlay');
     const overlayInfo = document.getElementById('overlay-info');
     const peerIdInput = document.getElementById('peer-id-input');
@@ -192,45 +238,54 @@
     const btnControl = document.getElementById('btn-control');
     const btnMode = document.getElementById('btn-mode');
     const btnReset = document.getElementById('btn-reset');
-    
+
     let peer = null;
     let call = null;
     let dataConn = null;
     let hasControl = false;
     let frameCount = 0;
     let lastFpsTime = performance.now();
+    /** Accumulated control signals to be sent to the host. */
     let signals = { yaw: 0, pitch: 0, zoom: 0, panX: 0, panY: 0 };
-    
+
+    // ====== Touch & Mouse Input State ======
     let touchStart = null;
     let lastTouchDistance = 0;
     let mouseDown = false;
     let lastMouse = { x: 0, y: 0 };
-    
+
     let renderLoopId = null;
-    
+
+    /**
+     * Resize the 2D canvas to match the viewport dimensions.
+     */
     function resizeCanvas() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
     }
-    
+
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
-    
+
+    /**
+     * Main render loop: draws the current video frame onto the canvas
+     * with letterboxing (centered, maintaining aspect ratio). Tracks FPS.
+     */
     function renderCanvas() {
       if (video.readyState >= 2) {
         const scaleX = canvas.width / video.videoWidth;
         const scaleY = canvas.height / video.videoHeight;
         const scale = Math.min(scaleX, scaleY);
-        
+
         const scaledWidth = video.videoWidth * scale;
         const scaledHeight = video.videoHeight * scale;
         const offsetX = (canvas.width - scaledWidth) / 2;
         const offsetY = (canvas.height - scaledHeight) / 2;
-        
+
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(video, offsetX, offsetY, scaledWidth, scaledHeight);
-        
+
         frameCount++;
         const now = performance.now();
         if (now - lastFpsTime >= 1000) {
@@ -239,10 +294,11 @@
           lastFpsTime = now;
         }
       }
-      
+
       renderLoopId = requestAnimationFrame(renderCanvas);
     }
-    
+
+    /** Connect button click handler: triggers PeerJS connection to the host. */
     btnConnect.addEventListener('click', () => {
       const peerId = peerIdInput.value.trim();
       if (!peerId) {
@@ -251,30 +307,37 @@
       }
       connectToHost(peerId);
     });
-    
+
+    /** Allow pressing Enter in the input to connect. */
     peerIdInput.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') {
         btnConnect.click();
       }
     });
-    
+
+    /**
+     * Establish a PeerJS connection to the host.
+     * Creates a valid (dummy) MediaStream to fulfil the WebRTC call API,
+     * then sets up data channel for sending control signals.
+     * @param {string} hostPeerId - The PeerJS ID of the host to connect to
+     */
     function connectToHost(hostPeerId) {
       console.log('[Client] Tentativo connessione a:', hostPeerId);
       overlayInfo.textContent = 'Inizializzazione PeerJS...';
-      
+
       peer = new Peer({
         host: window.location.hostname,
         port: 3001,
         path: '/peerjs',
         debug: 3
       });
-      
+
       peer.on('open', (id) => {
         console.log('[Client] Peer ID:', id);
         console.log('[Client] Chiamata host:', hostPeerId);
         overlayInfo.textContent = 'Connessione all\'host...';
-        
-        // Crea un canvas offscreen per generare un media stream valido
+
+        // Create an off-screen 1×1 canvas to generate a valid MediaStream (required by PeerJS call API)
         const offscreenCanvas = document.createElement('canvas');
         offscreenCanvas.width = 1;
         offscreenCanvas.height = 1;
@@ -282,42 +345,47 @@
         offscreenCtx.fillStyle = '#000';
         offscreenCtx.fillRect(0, 0, 1, 1);
         const validStream = offscreenCanvas.captureStream(30);
-        
+
         console.log('[Client] Creazione chiamata con stream valido');
         call = peer.call(hostPeerId, validStream);
-        
+
         console.log('[Client] Creazione connessione dati...');
         dataConn = peer.connect(hostPeerId);
-        
+
         dataConn.on('open', () => {
           console.log('[Client] ✓ Connessione dati aperta, ID:', dataConn.connectionId);
         });
-        
+
         dataConn.on('error', (err) => {
           console.error('[Client] Errore connessione dati:', err);
         });
-        
+
+        /**
+         * Handle the incoming remote stream from the host.
+         * Binds it to the hidden video element and attempts autoplay.
+         * Falls back to a tap-to-start interaction if autoplay is blocked.
+         */
         call.on('stream', (remoteStream) => {
           console.log('[Client] ✓ Stream ricevuto:', remoteStream);
           console.log('[Client] Stream tracks:', remoteStream.getTracks().length);
           remoteStream.getTracks().forEach((track, i) => {
             console.log(`[Client] Track ${i}:`, track.kind, track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
           });
-          
+
           console.log('[Client] Video element:', video);
           console.log('[Client] Video dimensions:', video.videoWidth, 'x', video.videoHeight);
-          
+
           video.srcObject = remoteStream;
           console.log('[Client] srcObject impostato');
-          
+
           video.onloadedmetadata = () => {
             console.log('[Client] Video metadata caricato:', video.videoWidth, 'x', video.videoHeight);
           };
-          
+
           video.oncanplay = () => {
             console.log('[Client] Video pronto per la riproduzione');
           };
-          
+
           video.play().then(() => {
             console.log('[Client] ✓ Video in riproduzione');
             overlay.classList.add('hidden');
@@ -326,7 +394,7 @@
             console.warn('[Client] Autoplay bloccato, retry su interazione:', err);
             overlayInfo.textContent = 'Tocca per avviare lo stream';
             overlay.style.cursor = 'pointer';
-            
+
             const startStream = () => {
               video.play().then(() => {
                 console.log('[Client] ✓ Video avviato dopo interazione');
@@ -340,34 +408,40 @@
               overlay.removeEventListener('click', startStream);
               overlay.removeEventListener('touchstart', startStream);
             };
-            
+
             overlay.addEventListener('click', startStream);
             overlay.addEventListener('touchstart', startStream);
           });
         });
-        
+
         call.on('close', () => {
           console.log('[Client] Chiamata chiusa');
           overlayInfo.textContent = 'Connessione terminata';
           overlay.classList.remove('hidden');
         });
-        
+
         call.on('error', (err) => {
           console.error('[Client] Errore chiamata:', err);
           overlayInfo.textContent = 'Errore: ' + err.message;
         });
       });
-      
+
       peer.on('error', (err) => {
         console.error('[Client] Errore PeerJS:', err);
         overlayInfo.textContent = 'Errore: ' + err.type + ' - ' + err.message;
       });
     }
-    
+
+    // ====== UI Button Handlers ======
+
+    /**
+     * Toggle between "Take Control" and "Release Control".
+     * When active, touch/mouse input is captured and sent to the host.
+     */
     btnControl.addEventListener('click', () => {
       if (!call) return;
       hasControl = !hasControl;
-      
+
       if (hasControl) {
         btnControl.textContent = 'Release Control';
         btnControl.classList.add('active');
@@ -380,13 +454,15 @@
         controlStatus.classList.remove('active');
       }
     });
-    
+
+    /** Send a reset signal to the host to restore the default camera view. */
     btnReset.addEventListener('click', () => {
       if (dataConn && dataConn.open) {
         dataConn.send({ type: 'reset' });
       }
     });
-    
+
+    /** Toggle camera mode between Isometric and FPS, sending the command to the host. */
     btnMode.addEventListener('click', () => {
       if (dataConn && dataConn.open) {
         dataConn.send({ type: 'switchMode' });
@@ -394,11 +470,18 @@
         btnMode.textContent = btnMode.classList.contains('fps') ? 'Mode: FPS' : 'Mode: Isometric';
       }
     });
-    
+
+    // ====== Touch Controls ======
+    // Single finger = orbit (yaw/pitch), two fingers = pinch-zoom + pan.
+
+    /**
+     * Touch start: record initial position (single finger) or pinch distance (two fingers).
+     * Only active when hasControl is true.
+     */
     canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
       if (!hasControl) return;
-      
+
       if (e.touches.length === 1) {
         touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       } else if (e.touches.length === 2) {
@@ -407,11 +490,15 @@
         lastTouchDistance = Math.sqrt(dx * dx + dy * dy);
       }
     });
-    
+
+    /**
+     * Touch move: compute orbit deltas (one finger) or zoom delta + pan (two fingers).
+     * Accumulates signals for periodic sending to the host.
+     */
     canvas.addEventListener('touchmove', (e) => {
       e.preventDefault();
       if (!hasControl) return;
-      
+
       if (e.touches.length === 1 && touchStart) {
         const dx = e.touches[0].clientX - touchStart.x;
         const dy = e.touches[0].clientY - touchStart.y;
@@ -423,26 +510,29 @@
         const dx = e.touches[0].clientX - e.touches[1].clientX;
         const dy = e.touches[0].clientY - e.touches[1].clientY;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        
+
         if (lastTouchDistance > 0) {
           const zoomDelta = (lastTouchDistance - dist) * 0.001;
           signals.zoom += zoomDelta;
           console.log('[Client] Touch zoom:', { zoom: signals.zoom, delta: zoomDelta });
         }
-        
+
         const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
         const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-        
+
         if (touchStart) {
           signals.panX += (cx - touchStart.x) * 0.01;
           signals.panY += (cy - touchStart.y) * 0.01;
         }
-        
+
         lastTouchDistance = dist;
         touchStart = { x: cx, y: cy };
       }
     });
-    
+
+    /**
+     * Touch end: clear touch state when all fingers are lifted.
+     */
     canvas.addEventListener('touchend', (e) => {
       e.preventDefault();
       if (e.touches.length === 0) {
@@ -450,16 +540,24 @@
         lastTouchDistance = 0;
       }
     });
-    
+
+    // ====== Mouse Controls ======
+
+    /**
+     * Mouse down: begin drag tracking.
+     */
     canvas.addEventListener('mousedown', (e) => {
       if (!hasControl) return;
       mouseDown = true;
       lastMouse = { x: e.clientX, y: e.clientY };
     });
-    
+
+    /**
+     * Mouse move: left-button orbit, middle-button pan.
+     */
     canvas.addEventListener('mousemove', (e) => {
       if (!hasControl || !mouseDown) return;
-      
+
       if (e.buttons === 1) {
         const dx = e.clientX - lastMouse.x;
         const dy = e.clientY - lastMouse.y;
@@ -472,12 +570,16 @@
         signals.panX += dx * 0.01;
         signals.panY += dy * 0.01;
       }
-      
+
       lastMouse = { x: e.clientX, y: e.clientY };
     });
-    
+
+    /** Mouse up: end drag. */
     canvas.addEventListener('mouseup', () => { mouseDown = false; });
-    
+
+    /**
+     * Mouse wheel: accumulate zoom signal.
+     */
     canvas.addEventListener('wheel', (e) => {
       if (!hasControl) return;
       e.preventDefault();
@@ -485,10 +587,12 @@
       signals.zoom += zoomDelta;
       console.log('[Client] Mouse zoom:', { zoom: signals.zoom, delta: zoomDelta });
     }, { passive: false });
-    
+
+    // ====== Periodic Signal Sending ======
+    // Sends accumulated control signals to the host every 33ms (~30fps) to avoid flooding.
     setInterval(() => {
       if (!hasControl || !dataConn || !dataConn.open) return;
-      
+
       const hasSignal = signals.yaw !== 0 || signals.pitch !== 0 || signals.zoom !== 0 || signals.panX !== 0 || signals.panY !== 0;
       if (hasSignal) {
         const signalData = {
@@ -499,7 +603,7 @@
           panX: signals.panX,
           panY: signals.panY
         };
-        
+
         try {
           dataConn.send(signalData);
           console.log('[Client] ✓ Segnale inviato su connessione', dataConn.connectionId, ':', signalData);
@@ -509,7 +613,9 @@
         }
       }
     }, 33);
-    
+
+    // ====== Debug Status Logging ======
+    // Logs the data connection state every 5 seconds for debugging.
     setInterval(() => {
       console.log('[Client] Stato connessione dati:', {
         exists: !!dataConn,

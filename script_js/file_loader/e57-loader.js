@@ -1,26 +1,64 @@
+/**
+ * E57 (ASTM-E57) point cloud loader with built-in bzip2 decompression and
+ * chunked reading for large files.
+ *
+ * Parses the binary E57 format including its XML-based metadata section
+ * and compressedVector point data packets. Implements a full bzip2
+ * decompressor in JavaScript for handling compressed point payloads.
+ * Supports both single-pass loading for small files and chunked streaming
+ * for large datasets, with dynamic array resizing.
+ *
+ * All parsing runs in a Web Worker; the main thread only manages file
+ * slicing and Worker message routing.
+ *
+ * @module e57-loader
+ */
+
 const E57_WORKER_SOURCE = `
 'use strict';
 
+/**
+ * Decompresses a bzip2-compressed byte array into an uncompressed
+ * Uint8Array. Implements the full bzip2 block format: header validation,
+ * Huffman tree decoding (with MTF), Burrows-Wheeler inverse transform,
+ * and RLE decompression.
+ *
+ * @param {Uint8Array} input - The bzip2-compressed input data.
+ * @returns {Uint8Array} The decompressed output.
+ */
 function bzip2Decompress(input) {
   var out = [];
   var bytePos = 0, bitPos = 0;
 
+  /**
+   * Reads a single bit from the input stream.
+   * @returns {number} The bit value (0 or 1).
+   */
   function readBit() {
     var bit = (input[bytePos] >> (7 - bitPos)) & 1;
     if (++bitPos === 8) { bytePos++; bitPos = 0; }
     return bit;
   }
 
+  /**
+   * Reads n bits from the input stream, constructing a numerical value.
+   * @param {number} n - Number of bits to read.
+   * @returns {number} The combined bit value.
+   */
   function readBits(n) {
     var v = 0;
     for (var i = 0; i < n; i++) v = (v << 1) | readBit();
     return v;
   }
 
+  /**
+   * Aligns the bit cursor to the next byte boundary.
+   */
   function alignByte() {
     if (bitPos) { bytePos++; bitPos = 0; }
   }
 
+  // Validate bzip2 magic bytes: 'BZh'
   if (input[0] !== 0x42 || input[1] !== 0x5A || input[2] !== 0x68) {
     throw new Error('Invalid bzip2 header');
   }
@@ -31,6 +69,11 @@ function bzip2Decompress(input) {
   var BLOCK_MAGIC = [0x31,0x41,0x59,0x26,0x53,0x59];
   var END_MAGIC   = [0x17,0x72,0x45,0x38,0x50,0x90];
 
+  /**
+   * Reads 48 bits and compares them against a magic byte sequence.
+   * @param {number[]} magic - The expected 6-byte magic sequence.
+   * @returns {boolean} True if the magic matches.
+   */
   function checkMagic(magic) {
     for (var i = 0; i < 6; i++) {
       if (readBits(8) !== magic[i]) return false;
@@ -38,6 +81,13 @@ function bzip2Decompress(input) {
     return true;
   }
 
+  /**
+   * Builds a canonical Huffman tree from an array of code lengths.
+   * @param {Int32Array|Uint8Array} lengths - Code lengths for each symbol.
+   * @param {number} n - Number of symbols.
+   * @returns {{table: Int32Array, n: number, maxLen: number}} The
+   *   Huffman tree: table stores [code, len] pairs sequentially.
+   */
   function buildHuffmanTree(lengths, n) {
     var maxLen = 0;
     for (var i = 0; i < n; i++) if (lengths[i] > maxLen) maxLen = lengths[i];
@@ -64,6 +114,12 @@ function bzip2Decompress(input) {
     return { table: table, n: n, maxLen: maxLen };
   }
 
+  /**
+   * Decodes a single symbol from the Huffman tree by reading bits
+   * until a valid code matches.
+   * @param {object} tree - A Huffman tree object from buildHuffmanTree.
+   * @returns {number} The decoded symbol index.
+   */
   function decodeHuffman(tree) {
     var code = 0;
     for (var len = 1; len <= tree.maxLen; len++) {
@@ -76,6 +132,7 @@ function bzip2Decompress(input) {
     throw new Error('Huffman decode error');
   }
 
+  // Process bzip2 blocks until the end-of-stream magic is found
   while (true) {
     var savedBP = bytePos, savedBPt = bitPos;
     if (checkMagic(END_MAGIC)) {
@@ -91,6 +148,7 @@ function bzip2Decompress(input) {
     if (randomized) throw new Error('Randomized bzip2 not supported');
     var origPtr = readBits(24);
 
+    // Read which characters are used in this block (bitmap)
     var usedChars = new Uint8Array(256);
     var nUsed = 0;
     var rangeMap = readBits(16);
@@ -115,6 +173,7 @@ function bzip2Decompress(input) {
     var nTrees = readBits(3);
     var nSelectors = readBits(15);
 
+    // Read Huffman tree selectors with MTF (Move-To-Front) decoding
     var selectorList = new Uint8Array(nSelectors);
     var mtfTable = [];
     for (var i = 0; i < nTrees; i++) mtfTable.push(i);
@@ -128,6 +187,7 @@ function bzip2Decompress(input) {
       selectorList[i] = tmp;
     }
 
+    // Build Huffman trees for this block
     var huffmanTrees = [];
     for (var t = 0; t < nTrees; t++) {
       var currLen = readBits(5);
@@ -146,6 +206,7 @@ function bzip2Decompress(input) {
     var selIdx = 0;
     var symbolsInGroup = 0;
 
+    // Decode Huffman symbols for this block
     while (selIdx < nSelectors) {
       if (symbolsInGroup === 0) {
         symbolsInGroup = GROUP_SIZE;
@@ -161,6 +222,7 @@ function bzip2Decompress(input) {
       }
     }
 
+    // Inverse MTF (Move-To-Front) transformation and RLE run-length decoding
     var RUNA = nUsed;
     var RUNB = nUsed + 1;
     var mtfState = usedSyms.slice();
@@ -193,6 +255,7 @@ function bzip2Decompress(input) {
 
     var nblock = bwtOutput.length;
 
+    // Inverse Burrows-Wheeler Transform using the original pointer
     var count = new Int32Array(256);
     for (var i = 0; i < nblock; i++) count[bwtOutput[i]]++;
 
@@ -213,6 +276,7 @@ function bzip2Decompress(input) {
       pos = lf[pos];
     }
 
+    // RLE (Run-Length Encoding) decompression of the block output
     var oi = 0;
     while (oi < nblock) {
       var c = blockOutput[oi++];
@@ -235,6 +299,17 @@ function bzip2Decompress(input) {
   return new Uint8Array(out);
 }
 
+/**
+ * Reads a UTF-8 encoded string from the E57 binary XML section.
+ * The first byte is the length (unless 0xFF, then the next 2 bytes
+ * form a 16-bit length).
+ *
+ * @param {DataView} dv - DataView over the file buffer.
+ * @param {number} pos - Current byte position.
+ * @param {boolean} le - Whether to use little-endian (unused, always true).
+ * @returns {{value: string, nextPos: number}} The decoded string and
+ *   the next read position.
+ */
 function readUString(dv, pos, le) {
   var len = dv.getUint8(pos); pos++;
   if (len === 0xFF) {
@@ -246,6 +321,18 @@ function readUString(dv, pos, le) {
   return { value: s, nextPos: pos };
 }
 
+/**
+ * Recursively parses an E57 XML binary node from the file buffer.
+ *
+ * E57 nodes can be of types: blob (1), structure (2), vector (3),
+ * integer (4), float (5), scaledInteger (6), string (7), and
+ * compressedVector (8). Each node type is decoded appropriately.
+ *
+ * @param {DataView} dv - DataView over the file buffer.
+ * @param {number} pos - Current byte position.
+ * @param {Uint8Array} fileData - The raw file bytes (for blob data).
+ * @returns {{type: string, name: string, nextPos: number, [children]: Array, [value]: number, [data]: Uint8Array, ...}} The parsed node.
+ */
 function parseNode(dv, pos, fileData) {
   var type = dv.getUint8(pos); pos++;
   var nameResult = readUString(dv, pos);
@@ -253,13 +340,13 @@ function parseNode(dv, pos, fileData) {
   pos = nameResult.nextPos;
 
   switch (type) {
-    case 1: {
+    case 1: { // blob: raw binary data
       var blobLen = Number(dv.getBigUint64(pos, true)); pos += 8;
       var data = fileData.slice(pos, pos + blobLen);
       pos += blobLen;
       return { type: 'blob', name: name, data: data, nextPos: pos };
     }
-    case 2: {
+    case 2: { // structure: ordered children
       var childCount = dv.getUint32(pos, true); pos += 4;
       var children = [];
       for (var i = 0; i < childCount; i++) {
@@ -269,7 +356,7 @@ function parseNode(dv, pos, fileData) {
       }
       return { type: 'structure', name: name, children: children, nextPos: pos };
     }
-    case 3: {
+    case 3: { // vector: homogeneous array of children
       var childCount = dv.getUint32(pos, true); pos += 4;
       var children = [];
       for (var i = 0; i < childCount; i++) {
@@ -279,25 +366,25 @@ function parseNode(dv, pos, fileData) {
       }
       return { type: 'vector', name: name, children: children, nextPos: pos };
     }
-    case 4: {
+    case 4: { // integer: signed 64-bit
       var value = Number(dv.getBigInt64(pos, true)); pos += 8;
       return { type: 'integer', name: name, value: value, nextPos: pos };
     }
-    case 5: {
+    case 5: { // float: IEEE 754 64-bit
       var value = dv.getFloat64(pos, true); pos += 8;
       return { type: 'float', name: name, value: value, nextPos: pos };
     }
-    case 6: {
+    case 6: { // scaledInteger: raw + scale + offset
       var raw = Number(dv.getBigInt64(pos, true)); pos += 8;
       var scale = dv.getFloat64(pos, true); pos += 8;
       var offset = dv.getFloat64(pos, true); pos += 8;
       return { type: 'scaledInteger', name: name, raw: raw, scale: scale, offset: offset, nextPos: pos };
     }
-    case 7: {
+    case 7: { // string: UTF-8 encoded
       var valResult = readUString(dv, pos);
       return { type: 'string', name: name, value: valResult.value, nextPos: valResult.nextPos };
     }
-    case 8: {
+    case 8: { // compressedVector: bzip2-compressed point data
       var binaryOffset = Number(dv.getBigUint64(pos, true)); pos += 8;
       var binaryLength = Number(dv.getBigUint64(pos, true)); pos += 8;
       var prototype = parseNode(dv, pos, fileData);
@@ -309,6 +396,13 @@ function parseNode(dv, pos, fileData) {
   }
 }
 
+/**
+ * Finds a child node by name within a structure or vector node.
+ *
+ * @param {object} node - The parent node (must have a children array).
+ * @param {string} name - The name to search for.
+ * @returns {object|null} The matching child node, or null if not found.
+ */
 function findChild(node, name) {
   if (!node || !node.children) return null;
   for (var i = 0; i < node.children.length; i++) {
@@ -317,6 +411,15 @@ function findChild(node, name) {
   return null;
 }
 
+/**
+ * Extracts field metadata from a prototype structure node.
+ *
+ * Each field includes its name, type, precision (for floats), scale/offset
+ * (for scaledIntegers), and min/max bounds where available.
+ *
+ * @param {object} prototype - The prototype node (type 'structure').
+ * @returns {Array<{name: string, type: string, precision?: string, scale?: number, offset?: number, minimum?: object, maximum?: object}>} Array of field descriptors.
+ */
 function getFieldInfo(prototype) {
   if (!prototype || prototype.type !== 'structure') return [];
   var fields = [];
@@ -342,6 +445,15 @@ function getFieldInfo(prototype) {
   return fields;
 }
 
+/**
+ * Computes the number of bits needed to represent a field's value range.
+ *
+ * For float fields, returns 32 or 64 based on precision. For integer and
+ * scaledInteger fields, uses the min/max range to determine bit width.
+ *
+ * @param {object} field - A field info object from getFieldInfo.
+ * @returns {number} Number of bits required.
+ */
 function computeBits(field) {
   if (field.type === 'float') {
     return field.precision === 'float' ? 32 : 64;
@@ -363,6 +475,17 @@ function computeBits(field) {
   return Math.ceil(Math.log2(range + 1));
 }
 
+/**
+ * Reads and decompresses the point data from a compressedVector node.
+ *
+ * Processes packet headers, decompresses bzip2 payloads when present, and
+ * decodes bit-packed fields into an array of record objects. Each record
+ * is a plain object with field names as keys and numeric values.
+ *
+ * @param {Uint8Array} fileData - The raw file bytes.
+ * @param {object} cvNode - The compressedVector node from the XML tree.
+ * @returns {Array<object>} Array of point records.
+ */
 function readCompressedVector(fileData, cvNode) {
   var offset = cvNode.binaryOffset;
   var length = cvNode.binaryLength;
@@ -409,10 +532,17 @@ function readCompressedVector(fileData, cvNode) {
       var dataEnd = pos + packetBytes;
       var payload = fileData.slice(dataStart, dataEnd);
 
+      // Check for bzip2 magic bytes
       if (payload.length >= 3 && payload[0] === 0x42 && payload[1] === 0x5A && payload[2] === 0x68) {
         try {
           var decompressed = bzip2Decompress(payload);
           var bitPos = 0;
+          /**
+           * Reads n bits from a decompressed Uint8Array buffer.
+           * @param {Uint8Array} buf - The byte buffer.
+           * @param {number} n - Number of bits to read.
+           * @returns {number} The combined bit value.
+           */
           function readBitsFromBuf(buf, n) {
             var v = 0;
             for (var b = 0; b < n; b++) {
@@ -471,7 +601,14 @@ function readCompressedVector(fileData, cvNode) {
           // skip packet on decompression error
         }
       } else {
+        // Non-bzip2 payload: read directly from raw bytes
         var bitPos = 0;
+        /**
+         * Reads n bits from a raw (non-compressed) Uint8Array buffer.
+         * @param {Uint8Array} buf - The byte buffer.
+         * @param {number} n - Number of bits to read.
+         * @returns {number} The combined bit value.
+         */
         function readBitsFromRaw(buf, n) {
           var v = 0;
           for (var b = 0; b < n; b++) {
@@ -535,6 +672,18 @@ function readCompressedVector(fileData, cvNode) {
   return records;
 }
 
+/**
+ * Web Worker message handler for E57 parsing.
+ *
+ * Supports multiple message types for chunked loading:
+ *   - 'parseHeader': validates the E57 signature and returns XML offset/length.
+ *   - 'parseXml': parses the XML binary section to find point data metadata.
+ *   - 'processChunk': decompresses and parses a chunk of binary point data.
+ *   - 'finalize': converts accumulated records into typed point arrays.
+ * Falls back to a single-pass (legacy) mode if the message is a raw ArrayBuffer.
+ *
+ * @listens MessageEvent
+ */
 self.onmessage = function(e) {
   try {
     var msg = e.data;
@@ -610,6 +759,7 @@ self.onmessage = function(e) {
       var pos = 0;
       var records = [];
 
+      // Process E57 data packets within this chunk
       while (pos + 4 <= arr.length) {
         var headerByte0 = arr[pos];
         var headerByte1 = arr[pos + 1];
@@ -628,6 +778,7 @@ self.onmessage = function(e) {
           var dataEnd = pos + packetBytes;
           var payload = arr.slice(dataStart, dataEnd);
 
+          // Check for bzip2 compression
           if (payload.length >= 3 && payload[0] === 0x42 && payload[1] === 0x5A && payload[2] === 0x68) {
             try {
               var decompressed = bzip2Decompress(payload);
@@ -690,6 +841,7 @@ self.onmessage = function(e) {
               // skip packet on decompression error
             }
           } else {
+            // Raw (non-bzip2) payload processing
             var bitPos = 0;
             function readBitsFromRaw(buf, n) {
               var v = 0;
@@ -758,6 +910,7 @@ self.onmessage = function(e) {
       });
     }
     else if (msg.type === 'finalize') {
+      // Convert all accumulated records into typed arrays
       var allRecords = msg.allRecords;
       var count = allRecords.length;
 
@@ -832,6 +985,7 @@ self.onmessage = function(e) {
       }, [positions.buffer, colors.buffer].concat(hasIntensity ? [intensity.buffer] : []));
     }
     else {
+      // Legacy mode: single-pass processing with raw ArrayBuffer
       var buffer = msg;
       var dv = new DataView(buffer);
       var arr = new Uint8Array(buffer);
@@ -937,12 +1091,19 @@ self.onmessage = function(e) {
 };
 `;
 
+/** Loads ASTM E57 point clouds with built-in bzip2 decompression. */
 export class E57Loader {
+  /**
+   * Creates a Blob URL for the inline E57 worker source.
+   */
   constructor() {
     const blob = new Blob([E57_WORKER_SOURCE], { type: 'application/javascript' });
     this._workerUrl = URL.createObjectURL(blob);
   }
 
+  /**
+   * Revokes the worker Blob URL and cleans up resources.
+   */
   dispose() {
     if (this._workerUrl) {
       URL.revokeObjectURL(this._workerUrl);
@@ -950,14 +1111,33 @@ export class E57Loader {
     }
   }
 
+  /**
+   * Checks whether a file has an .e57 extension.
+   *
+   * @param {File} file - The file to check.
+   * @returns {boolean} True if the file is an E57 file.
+   */
   static isE57File(file) {
     return file.name.toLowerCase().endsWith('.e57');
   }
 
+  /**
+   * Reads an E57 file into an ArrayBuffer.
+   *
+   * @param {File} file - The DOM File object.
+   * @returns {Promise<ArrayBuffer>} The raw file buffer.
+   */
   static async readFile(file) {
     return await file.arrayBuffer();
   }
 
+  /**
+   * Parses an E57 buffer in a Web Worker (legacy single-pass mode) and
+   * returns structured point cloud data.
+   *
+   * @param {ArrayBuffer} buf - The raw E57 file buffer.
+   * @returns {Promise<{ok: boolean, positions: Float32Array, colors: Uint8Array, intensity: Float32Array|null, count: number, hasColor: boolean, hasIntensity: boolean, bounds: object, center: number[], zMin: number, zMax: number, intensityMin: number, intensityMax: number}>} Parsed point data.
+   */
   load(buf) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(this._workerUrl);
@@ -971,6 +1151,17 @@ export class E57Loader {
     });
   }
 
+  /**
+   * Loads a large E57 file using chunked reading (64MB chunks). The
+   * header is read first to extract the XML section, then binary point
+   * data is processed in chunks to avoid memory pressure. Dynamically
+   * reallocates typed arrays as more points are discovered.
+   *
+   * @param {File} file - The DOM File object to load.
+   * @param {Function} [onProgress] - Callback receiving 0..1 progress.
+   * @returns {Promise<object>} Parsed point cloud data with positions,
+   *   colors, intensity, bounds, center, and metadata.
+   */
   async loadLargeFile(file, onProgress) {
     const CHUNK_SIZE = 64 * 1024 * 1024;
     const worker = new Worker(this._workerUrl);
@@ -1106,6 +1297,11 @@ export class E57Loader {
         reject(err);
       };
       
+      /**
+       * Slices and sends the next chunk of binary point data to the worker.
+       * @param {number} offset - Byte offset into the file's binary section.
+       * @returns {Promise<void>} Resolves when the chunk is posted.
+       */
       async function processNextChunk(offset) {
         const end = Math.min(offset + CHUNK_SIZE, binaryOffset + binaryLength);
         const chunkSlice = file.slice(offset, end);
@@ -1126,6 +1322,10 @@ export class E57Loader {
         }
       }
       
+      /**
+       * Finalizes parsing: fills missing colors, computes bounds and
+       * center, and resolves the promise with the final point data.
+       */
       function finalize() {
         if (!hasColor) {
           for (let i = 0; i < actualPoints; i++) {

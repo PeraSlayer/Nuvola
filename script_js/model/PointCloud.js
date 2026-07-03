@@ -1,11 +1,46 @@
+/**
+ * @file PointCloud.js
+ * @description Core PointCloud class for Nuvola's 2.5D point cloud viewer.
+ *              Manages point data (positions, colors, intensity), bounding-box
+ *              computation, octree-based level-of-detail selection, Potree-style
+ *              deferred node loading with an LRU cache, and screen-space picking.
+ *              Acts as the bridge between raw point data and the WebGL2 renderer.
+ */
+
 import { collectVisibleLeaves, extractCamParams } from './Octree.js';
 import { VisibilitySystem } from '../potree/VisibilitySystem.js';
 import { LRUCache } from '../potree/LRUCache.js';
 
+/**
+ * Initial capacity (in index entries) of the internal buffer used during
+ * visibility collection. Grows dynamically up to COLLECT_BUF_MAX.
+ */
 const COLLECT_BUF_INITIAL = 2_000_000;
+
+/**
+ * Upper bound (in index entries) for the visibility-collection buffer.
+ * Prevents unbounded memory growth on massive point clouds.
+ */
 const COLLECT_BUF_MAX = 100_000_000;
 
 export class PointCloud {
+  /**
+   * @param {Object} data - Point-cloud descriptor.
+   * @param {number} data.count - Number of points.
+   * @param {Float32Array} data.positions - Interleaved xyz positions (length = count*3).
+   * @param {Uint8Array} [data.colors] - RGB bytes (length = count*3).
+   * @param {Float32Array} [data.intensity] - Intensity values (length = count).
+   * @param {boolean} [data.hasColor]
+   * @param {boolean} [data.hasIntensity]
+   * @param {boolean} [data.hasClassification]
+   * @param {Object} [data.bounds] - Pre-computed bounding box {min:[3],max:[3]}.
+   * @param {Object} [data.octree] - Custom (non-Potree) octree root node.
+   * @param {Object} [data.octreeGeometry] - Potree octree geometry descriptor.
+   * @param {Uint32Array} [data.pickGrid] - Pre-indexed grid for GPU-free picking.
+   * @param {Uint32Array} [data.pickOffsets]
+   * @param {Uint32Array} [data.pickCounts]
+   * @param {number} [data.pickCells=128]
+   */
   constructor(data) {
     this.count       = data.count;
     this.positions   = data.positions;
@@ -53,6 +88,10 @@ export class PointCloud {
       this._pickCells = data.pickCells || 128;
     }
 
+    /**
+     * Scratch buffer for assembling visible-index arrays during draw-call
+     * generation. Null when using Potree (octreeGeometry) path.
+     */
     this._collectBuf = this.octreeGeometry ? null : new Uint32Array(COLLECT_BUF_INITIAL);
     this._collectBufCapacity = COLLECT_BUF_INITIAL;
     this._leafRefs = [];
@@ -61,6 +100,9 @@ export class PointCloud {
     this._needsRender = false;
   }
 
+  /**
+   * Releases all GPU and CPU resources held by this point cloud.
+   */
   dispose() {
     if (this.lru) this.lru.disposeAll();
     this.positions = null;
@@ -82,23 +124,46 @@ export class PointCloud {
     this.renderer = null;
   }
 
+  /**
+   * Sets the maximum number of points to render per frame.
+   * Also updates the LRU cache capacity accordingly.
+   * @param {number} val
+   */
   set pointBudget(val) {
     this.visibilitySystem.pointBudget = val;
     this.visibilitySystem.invalidateCache();
     if (this.lru) this.lru.maxNumPoints = val * 2;
   }
 
+  /**
+   * Sets the maximum visible distance beyond which nodes are culled.
+   * @param {number} val
+   */
   set maxVisibleDistance(val) {
     this.visibilitySystem.maxVisibleDistance = val;
     this.visibilitySystem.invalidateCache();
   }
 
+  /**
+   * Returns whether the renderer should re-draw and resets the flag.
+   * @returns {boolean}
+   */
   consumeNeedsRender() {
     const v = this._needsRender;
     this._needsRender = false;
     return v;
   }
 
+  /**
+   * Produces a draw-call descriptor for the given camera and viewport.
+   * Delegates to {@link _getDrawCallPotree} when an octreeGeometry is present,
+   * otherwise traverses the custom octree directly.
+   *
+   * @param {Camera} camera
+   * @param {number} viewportW - Viewport width in pixels.
+   * @param {number} viewportH - Viewport height in pixels.
+   * @returns {{indices: Uint32Array|null, count: number, nodes?: Array, profiling?: Object}}
+   */
   getDrawCall(camera, viewportW, viewportH) {
     if (this.octreeGeometry && this.octreeGeometry.root) {
       return this._getDrawCallPotree(camera, viewportW, viewportH);
@@ -108,6 +173,7 @@ export class PointCloud {
     const total = this.count;
     const budget = this.visibilitySystem ? this.visibilitySystem.pointBudget : total;
 
+    // If all points fit within the budget, render everything.
     if (total <= budget) {
       return { indices: null, count: this.count };
     }
@@ -122,6 +188,7 @@ export class PointCloud {
 
     const target = Math.min(budget, visCount);
 
+    // Grow the collection buffer if the target count exceeds capacity.
     if (target >= this._collectBufCapacity) {
       const newCap = Math.min(COLLECT_BUF_MAX, Math.max(this._collectBufCapacity * 2, target + 100000));
       this._collectBuf = new Uint32Array(newCap);
@@ -129,6 +196,7 @@ export class PointCloud {
     }
     const buf = this._collectBuf;
 
+    // All visible leaves fit within the budget — copy them straight.
     if (visCount <= budget) {
       let off = 0;
       for (let li = 0; li < leaves.length; li++) {
@@ -138,6 +206,7 @@ export class PointCloud {
       return { indices: buf.subarray(0, off), count: off };
     }
 
+    // Sub-sample visible leaves via strided selection to hit the budget.
     const stride = Math.max(1, Math.round(visCount / target));
     let outIdx = 0, globalPos = 0;
     for (let li = 0; li < leaves.length && outIdx < target; li++) {
@@ -151,6 +220,16 @@ export class PointCloud {
     return { indices: buf.subarray(0, outIdx), count: outIdx };
   }
 
+  /**
+   * Potree-specific draw-call generation using the {@link VisibilitySystem}.
+   * Schedules loading of newly visible nodes and touches all visible nodes
+   * in the LRU cache to keep them resident.
+   *
+   * @param {Camera} camera
+   * @param {number} viewportW
+   * @param {number} viewportH
+   * @returns {{nodes: Array, count: number, indices: null, profiling: {selectNodesMs: number}}}
+   */
   _getDrawCallPotree(camera, viewportW, viewportH) {
     const budget = this.visibilitySystem.pointBudget;
     const t0 = performance.now();
@@ -183,6 +262,13 @@ export class PointCloud {
     return { nodes: loadedNodes, count: total, indices: null, profiling: { selectNodesMs: selectMs } };
   }
 
+  /**
+   * Initiates asynchronous loading for up to {@link VisibilitySystem.maxNodesLoadingPerFrame}
+   * nodes. Each node, once loaded, triggers a renderer upload and invalidates
+   * the visibility cache.
+   *
+   * @param {Array} unloadedNodes - Nodes queued for loading by the visibility system.
+   */
   _scheduleNodeLoads(unloadedNodes) {
     if (!this.renderer || !unloadedNodes || unloadedNodes.length === 0) return;
     const remaining = this.visibilitySystem.maxNodesLoadingPerFrame - this.visibilitySystem.numNodesLoading;
@@ -213,6 +299,10 @@ export class PointCloud {
     }
   }
 
+  /**
+   * Scans all point positions to compute the bounding box and intensity range.
+   * Only called when the point cloud is constructed without pre-computed bounds.
+   */
   _computeBounds() {
     const p = this.positions;
     const inten = this.intensity;
@@ -237,11 +327,24 @@ export class PointCloud {
     }
   }
 
+  /**
+   * Finds the index of the point nearest to a screen-space coordinate (sx, sy)
+   * within an optional radius. Uses a pre-built spatial grid when available,
+   * falling back to a brute-force linear scan.
+   *
+   * @param {Camera} camera
+   * @param {Object} renderer
+   * @param {number} sx - Screen-space X coordinate.
+   * @param {number} sy - Screen-space Y coordinate.
+   * @param {number} [radiusPx=12] - Search radius in pixels.
+   * @returns {number} Index of the nearest point, or -1 if none found.
+   */
   pickNearest(camera, renderer, sx, sy, radiusPx = 12) {
     if (!this.count || !this._pickGrid) return -1;
     let bestIdx = -1, bestDist = radiusPx * radiusPx;
     const p = this.positions;
     const cells = this._pickCells;
+    // Brute-force fallback when no spatial index (_pickOffsets) is available.
     if (!this._pickOffsets) {
       for (let i = 0; i < this.count; i++) {
         const [px, py] = camera.project(p[i*3], p[i*3+1], p[i*3+2]);
@@ -251,6 +354,7 @@ export class PointCloud {
       }
       return bestIdx;
     }
+    // Grid-based search: compute cell extents and only check cells near (sx, sy).
     const spanX = this.bounds.max[0] - this.bounds.min[0] || 1;
     const spanY = this.bounds.max[1] - this.bounds.min[1] || 1;
     const cz = this.center[2];
@@ -276,6 +380,12 @@ export class PointCloud {
     return bestIdx;
   }
 
+  /**
+   * Estimates the GPU memory footprint (in bytes) for this point cloud,
+   * including positions, colors, intensity, and all octree index buffers.
+   *
+   * @returns {number} Approximate byte size on the GPU.
+   */
   getGPUByteSize() {
     if (!this.octree) return this.count * (12 + 3 + (this.intensity ? 4 : 0));
     let total = this.count * (12 + 3 + (this.intensity ? 4 : 0));
